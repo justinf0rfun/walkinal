@@ -124,6 +124,18 @@ Fallback shortcut:
 
 - `Cmd+Shift+K`
 
+## Packaged App Won't Open (Security Warning)
+
+The `.app` built by `npm run dist` is unsigned. macOS Gatekeeper blocks unsigned apps by default.
+
+To allow it:
+
+1. Open **System Settings → Privacy & Security**
+2. Scroll to the security section
+3. Click **Open Anyway** next to the Clui CC message
+
+You only need to do this once. This is a local build, not App Store distribution.
+
 ## Marketplace Shows "Failed to Load"
 
 Expected when offline. Marketplace needs internet access; core app features continue to work.

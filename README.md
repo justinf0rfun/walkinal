@@ -85,6 +85,48 @@ To close the app, use the tray icon (Quit) or run:
 
 You can also double-click these `.command` files from Finder.
 
+## Run as a macOS App (No Terminal After Setup)
+
+Once dependencies are installed, you can build a standalone `Clui CC.app` and use it like any other Mac app.
+
+**1) Build the app**
+
+```bash
+npm run dist
+```
+
+**2) Copy to Applications**
+
+Check which output was created and copy it:
+
+```bash
+ls release/
+```
+
+Apple Silicon (M1/M2/M3/M4) — you'll see `mac-arm64/`:
+
+```bash
+cp -R "release/mac-arm64/Clui CC.app" /Applications/
+```
+
+Intel Mac — you'll see `mac/`:
+
+```bash
+cp -R "release/mac/Clui CC.app" /Applications/
+```
+
+**3) First launch — Gatekeeper warning**
+
+Because the app is unsigned (local open-source build, not from the App Store), macOS will block it on first launch. To allow it:
+
+1. Open **System Settings → Privacy & Security**
+2. Scroll down to the security section
+3. Click **Open Anyway** next to the Clui CC message
+
+You only need to do this once.
+
+> This is a local build on your machine. It is not distributed through the App Store.
+
 <details>
 <summary><strong>Setup Prerequisites (Detailed)</strong></summary>
 
