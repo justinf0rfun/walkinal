@@ -22,6 +22,7 @@ let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let screenshotCounter = 0
 let toggleSequence = 0
+let lastWindowBounds: Electron.Rectangle | null = null
 
 // Feature flag: enable PTY interactive permissions transport
 const INTERACTIVE_PTY = process.env.CLUI_INTERACTIVE_PERMISSIONS_PTY === '1'
@@ -124,6 +125,7 @@ function createWindow(): void {
       nodeIntegration: false,
     },
   })
+  lastWindowBounds = mainWindow.getBounds()
 
   // Belt-and-suspenders: panel already joins all spaces and floats,
   // but explicit flags ensure correct behavior on older Electron builds.
@@ -161,17 +163,9 @@ function showWindow(source = 'unknown'): void {
   if (!mainWindow) return
   const toggleId = ++toggleSequence
 
-  // Position on the display where the cursor currently is (not always primary)
-  const cursor = screen.getCursorScreenPoint()
-  const display = screen.getDisplayNearestPoint(cursor)
-  const { width: sw, height: sh } = display.workAreaSize
-  const { x: dx, y: dy } = display.workArea
-  mainWindow.setBounds({
-    x: dx + Math.round((sw - BAR_WIDTH) / 2),
-    y: dy + sh - PILL_HEIGHT - PILL_BOTTOM_MARGIN,
-    width: BAR_WIDTH,
-    height: PILL_HEIGHT,
-  })
+  if (lastWindowBounds) {
+    mainWindow.setBounds(lastWindowBounds)
+  }
 
   // Always re-assert space membership — the flag can be lost after hide/show cycles
   // and must be set before show() so the window joins the active Space, not its
@@ -179,15 +173,36 @@ function showWindow(source = 'unknown'): void {
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
 
   if (SPACES_DEBUG) {
-    log(`[spaces] showWindow#${toggleId} source=${source} move-to-display id=${display.id}`)
+    const b = mainWindow.getBounds()
+    log(`[spaces] showWindow#${toggleId} source=${source} preserve-bounds=(${b.x},${b.y},${b.width}x${b.height})`)
     snapshotWindowState(`showWindow#${toggleId} pre-show`)
   }
   // As an accessory app (app.dock.hide), show() + focus gives keyboard
   // without deactivating the active app — hover preserved everywhere.
   mainWindow.show()
+  if (lastWindowBounds) {
+    mainWindow.setBounds(lastWindowBounds)
+  }
   mainWindow.webContents.focus()
   broadcast(IPC.WINDOW_SHOWN)
   if (SPACES_DEBUG) scheduleToggleSnapshots(toggleId, 'show')
+}
+
+function resetWindowPosition(): void {
+  if (!mainWindow) return
+
+  const cursor = screen.getCursorScreenPoint()
+  const display = screen.getDisplayNearestPoint(cursor)
+  const { width: sw, height: sh } = display.workAreaSize
+  const { x: dx, y: dy } = display.workArea
+
+  mainWindow.setBounds({
+    x: dx + Math.round((sw - BAR_WIDTH) / 2),
+    y: dy + sh - PILL_HEIGHT - PILL_BOTTOM_MARGIN,
+    width: BAR_WIDTH,
+    height: PILL_HEIGHT,
+  })
+  lastWindowBounds = mainWindow.getBounds()
 }
 
 function toggleWindow(source = 'unknown'): void {
@@ -237,6 +252,22 @@ ipcMain.on(IPC.SET_IGNORE_MOUSE_EVENTS, (event, ignore: boolean, options?: { for
   if (win && !win.isDestroyed()) {
     win.setIgnoreMouseEvents(ignore, options || {})
   }
+})
+
+// Manual window drag — works reliably with frameless + setIgnoreMouseEvents
+ipcMain.on(IPC.START_WINDOW_DRAG, (event, deltaX: number, deltaY: number) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (win && !win.isDestroyed()) {
+    const [x, y] = win.getPosition()
+    // Vertical is handled in two phases in the renderer: window first (until macOS clamps),
+    // then CSS translateY within the window — so deltaY here is always within allowed range
+    win.setPosition(Math.round(x + deltaX), Math.round(y + deltaY))
+    lastWindowBounds = win.getBounds()
+  }
+})
+
+ipcMain.on(IPC.RESET_WINDOW_POSITION, () => {
+  resetWindowPosition()
 })
 
 // ─── IPC Handlers (typed, strict) ───
