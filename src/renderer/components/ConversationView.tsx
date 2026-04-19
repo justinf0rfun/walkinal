@@ -1,74 +1,32 @@
-import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import React, { useRef, useEffect, useState, useCallback } from 'react'
+import { motion } from 'framer-motion'
 import {
-  FileText, PencilSimple, FileArrowUp, Terminal, MagnifyingGlass, Globe,
-  Robot, Question, Wrench, FolderOpen, Copy, Check, CaretRight, CaretDown,
-  SpinnerGap, ArrowCounterClockwise, Square,
+  PencilSimple, FolderOpen, Trash, ArrowBendUpLeft, ArrowUp, ArrowDown, X, CaretDown, CaretUp,
 } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
-import { PermissionCard } from './PermissionCard'
-import { PermissionDeniedCard } from './PermissionDeniedCard'
 import { useColors, useThemeStore } from '../theme'
-import type { Message } from '../../shared/types'
+import type { QueueItem, SentEntry } from '../../shared/types'
 
 // ─── Constants ───
 
-const INITIAL_RENDER_CAP = 100
-const PAGE_SIZE = 100
-const REMARK_PLUGINS = [remarkGfm] // Hoisted — prevents re-parse on every render
-
-// ─── Types ───
-
-type GroupedItem =
-  | { kind: 'user'; message: Message }
-  | { kind: 'assistant'; message: Message }
-  | { kind: 'system'; message: Message }
-  | { kind: 'tool-group'; messages: Message[] }
-
-// ─── Helpers ───
-
-function groupMessages(messages: Message[]): GroupedItem[] {
-  const result: GroupedItem[] = []
-  let toolBuf: Message[] = []
-
-  const flushTools = () => {
-    if (toolBuf.length > 0) {
-      result.push({ kind: 'tool-group', messages: [...toolBuf] })
-      toolBuf = []
-    }
-  }
-
-  for (const msg of messages) {
-    if (msg.role === 'tool') {
-      toolBuf.push(msg)
-    } else {
-      flushTools()
-      if (msg.role === 'user') result.push({ kind: 'user', message: msg })
-      else if (msg.role === 'assistant') result.push({ kind: 'assistant', message: msg })
-      else result.push({ kind: 'system', message: msg })
-    }
-  }
-  flushTools()
-  return result
-}
+const DRAFT_PANEL_MAX_HEIGHT_EXPANDED = 220
+const DRAFT_PANEL_MAX_HEIGHT_COMPACT = 168
 
 // ─── Main Component ───
 
 export function ConversationView() {
   const tabs = useSessionStore((s) => s.tabs)
   const activeTabId = useSessionStore((s) => s.activeTabId)
-  const sendMessage = useSessionStore((s) => s.sendMessage)
-  const staticInfo = useSessionStore((s) => s.staticInfo)
+  const removeQueueItem = useSessionStore((s) => s.removeQueueItem)
+  const editQueueItem = useSessionStore((s) => s.editQueueItem)
+  const moveQueueItem = useSessionStore((s) => s.moveQueueItem)
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
-  const [hovered, setHovered] = useState(false)
-  const [renderOffset, setRenderOffset] = useState(0) // 0 = show from tail
   const isNearBottomRef = useRef(true)
   const prevTabIdRef = useRef(activeTabId)
   const colors = useColors()
   const expandedUI = useThemeStore((s) => s.expandedUI)
+  const [historyExpanded, setHistoryExpanded] = useState(false)
 
   const tab = tabs.find((t) => t.id === activeTabId)
 
@@ -76,7 +34,6 @@ export function ConversationView() {
   useEffect(() => {
     if (activeTabId !== prevTabIdRef.current) {
       prevTabIdRef.current = activeTabId
-      setRenderOffset(0)
       isNearBottomRef.current = true
     }
   }, [activeTabId])
@@ -89,11 +46,10 @@ export function ConversationView() {
   }, [])
 
   // Auto-scroll when content changes and user is near bottom.
-  const msgCount = tab?.messages.length ?? 0
-  const lastMsg = tab?.messages[tab.messages.length - 1]
-  const permissionQueueLen = tab?.permissionQueue?.length ?? 0
-  const queuedCount = tab?.queuedPrompts?.length ?? 0
-  const scrollTrigger = `${msgCount}:${lastMsg?.content?.length ?? 0}:${permissionQueueLen}:${queuedCount}`
+  const sentCount = tab?.sentEntries.length ?? 0
+  const lastEntry = tab?.sentEntries[tab.sentEntries.length - 1]
+  const queueCount = tab?.queueItems.length ?? 0
+  const scrollTrigger = `${sentCount}:${lastEntry?.contentPreview?.length ?? 0}:${queueCount}`
 
   useEffect(() => {
     if (isNearBottomRef.current && scrollRef.current) {
@@ -101,128 +57,111 @@ export function ConversationView() {
     }
   }, [scrollTrigger])
 
-  // Group only the visible slice of messages
-  const allMessages = tab?.messages ?? []
-  const totalCount = allMessages.length
-  const startIndex = Math.max(0, totalCount - INITIAL_RENDER_CAP - renderOffset * PAGE_SIZE)
-  const visibleMessages = startIndex > 0 ? allMessages.slice(startIndex) : allMessages
-  const hasOlder = startIndex > 0
-
-  const grouped = useMemo(
-    () => groupMessages(visibleMessages),
-    [visibleMessages],
-  )
-
-  const hiddenCount = totalCount - visibleMessages.length
-
-  const handleLoadOlder = useCallback(() => {
-    setRenderOffset((o) => o + 1)
-  }, [])
-
   if (!tab) return null
 
   const isRunning = tab.status === 'running' || tab.status === 'connecting'
-  const isDead = tab.status === 'dead'
   const isFailed = tab.status === 'failed'
-  const showInterrupt = isRunning && tab.messages.some((m) => m.role === 'user')
 
-  if (tab.messages.length === 0) {
+  if (tab.sentEntries.length === 0 && tab.queueItems.length === 0) {
     return <EmptyState />
   }
 
-  // Messages from before initial render cap are "historical" — no motion
-  const historicalThreshold = Math.max(0, totalCount - 20)
-
-  const handleRetry = () => {
-    const lastUserMsg = [...tab.messages].reverse().find((m) => m.role === 'user')
-    if (lastUserMsg) {
-      sendMessage(lastUserMsg.content)
+  const handleEditQueueItem = (itemId: string) => {
+    const content = editQueueItem(itemId)
+    if (content) {
+      window.dispatchEvent(new CustomEvent('walkinal:set-input', { detail: content }))
     }
   }
 
   return (
-    <div
-      data-clui-ui
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      {/* Scrollable messages area */}
+    <div data-clui-ui>
       <div
-        ref={scrollRef}
-        className="overflow-y-auto overflow-x-hidden px-4 pt-2 conversation-selectable"
-        style={{ maxHeight: expandedUI ? 460 : 336, paddingBottom: 28 }}
-        onScroll={handleScroll}
+        className="flex flex-col overflow-hidden"
+        style={{ maxHeight: expandedUI ? 460 : 336 }}
       >
-        {/* Load older button */}
-        {hasOlder && (
-          <div className="flex justify-center py-2">
-            <button
-              onClick={handleLoadOlder}
-              className="text-[11px] px-3 py-1 rounded-full transition-colors"
-              style={{ color: colors.textTertiary, border: `1px solid ${colors.toolBorder}` }}
-            >
-              Load {Math.min(PAGE_SIZE, hiddenCount)} older messages ({hiddenCount} hidden)
-            </button>
-          </div>
-        )}
-
-        <div className="space-y-1 relative">
-          {grouped.map((item, idx) => {
-            const msgIndex = startIndex + idx
-            const isHistorical = msgIndex < historicalThreshold
-
-            switch (item.kind) {
-              case 'user':
-                return <UserMessage key={item.message.id} message={item.message} skipMotion={isHistorical} />
-              case 'assistant':
-                return <AssistantMessage key={item.message.id} message={item.message} skipMotion={isHistorical} />
-              case 'tool-group':
-                return <ToolGroup key={`tg-${item.messages[0].id}`} tools={item.messages} skipMotion={isHistorical} />
-              case 'system':
-                return <SystemMessage key={item.message.id} message={item.message} skipMotion={isHistorical} />
-              default:
-                return null
-            }
-          })}
+        <div
+          ref={scrollRef}
+          className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-4 pt-2 conversation-selectable"
+          style={{ paddingBottom: 20 }}
+          onScroll={handleScroll}
+        >
+          {tab.sentEntries.length > 0 && (
+            <div className="space-y-2 pb-3">
+              <button
+                onClick={() => setHistoryExpanded((prev) => !prev)}
+                className="w-full flex items-center justify-between text-left rounded-xl px-3 py-2 transition-colors"
+                style={{
+                  background: colors.surfaceHover,
+                  border: `1px solid ${colors.toolBorder}`,
+                  color: colors.textSecondary,
+                }}
+              >
+                <span className="text-[11px] uppercase tracking-[0.12em]">Sent History</span>
+                <span className="flex items-center gap-2 text-[11px]">
+                  <span style={{ color: colors.textTertiary }}>
+                    {tab.sentEntries.length} {tab.sentEntries.length === 1 ? 'item' : 'items'}
+                  </span>
+                  <span
+                    className="flex items-center gap-1 rounded-full px-2 py-0.5"
+                    style={{
+                      color: colors.accent,
+                      background: colors.accentLight,
+                      border: `1px solid ${colors.accentBorder}`,
+                    }}
+                  >
+                    {historyExpanded ? <CaretUp size={11} weight="bold" /> : <CaretDown size={11} weight="bold" />}
+                    <span>{historyExpanded ? 'Hide' : 'Show'}</span>
+                  </span>
+                </span>
+              </button>
+              {historyExpanded && tab.sentEntries.map((entry) => (
+                <SentHistoryItem key={entry.id} entry={entry} />
+              ))}
+            </div>
+          )}
+          <div ref={bottomRef} />
         </div>
 
-        {/* Permission card (shows first item from queue) */}
-        <AnimatePresence>
-          {tab.permissionQueue.length > 0 && (
-            <PermissionCard
-              tabId={tab.id}
-              permission={tab.permissionQueue[0]}
-              queueLength={tab.permissionQueue.length}
-            />
-          )}
-        </AnimatePresence>
-
-        {/* Permission denied fallback card */}
-        <AnimatePresence>
-          {tab.permissionDenied && (
-            <PermissionDeniedCard
-              tools={tab.permissionDenied.tools}
-              sessionId={tab.claudeSessionId}
-              projectPath={staticInfo?.projectPath || process.cwd()}
-              onDismiss={() => {
-                useSessionStore.setState((s) => ({
-                  tabs: s.tabs.map((t) =>
-                    t.id === tab.id ? { ...t, permissionDenied: null } : t
-                  ),
-                }))
-              }}
-            />
-          )}
-        </AnimatePresence>
-
-        {/* Queued prompts */}
-        <AnimatePresence>
-          {tab.queuedPrompts.map((prompt, i) => (
-            <QueuedMessage key={`queued-${i}`} content={prompt} />
-          ))}
-        </AnimatePresence>
-
-        <div ref={bottomRef} />
+        {(tab.queueItems.length > 0 || tab.sentEntries.length > 0) && (
+          <div
+            className="px-4 pt-3 pb-2 flex-shrink-0"
+            style={{
+              borderTop: `1px solid ${colors.toolBorder}`,
+              background: `linear-gradient(to bottom, ${colors.containerBg}, ${colors.containerBgCollapsed})`,
+            }}
+          >
+            <div className="text-[11px] uppercase tracking-[0.12em] mb-2" style={{ color: colors.textTertiary }}>
+              Draft Queue
+            </div>
+            {tab.queueItems.length > 0 ? (
+              <div className="space-y-2 overflow-y-auto" style={{ maxHeight: expandedUI ? DRAFT_PANEL_MAX_HEIGHT_EXPANDED : DRAFT_PANEL_MAX_HEIGHT_COMPACT }}>
+                {tab.queueItems.map((item, index) => (
+                  <QueueItemCard
+                    key={item.id}
+                    item={item}
+                    index={index}
+                    total={tab.queueItems.length}
+                    onEdit={() => handleEditQueueItem(item.id)}
+                    onRemove={() => removeQueueItem(item.id)}
+                    onMoveUp={() => moveQueueItem(item.id, 'up')}
+                    onMoveDown={() => moveQueueItem(item.id, 'down')}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div
+                className="rounded-2xl px-3 py-3 text-[12px]"
+                style={{
+                  color: colors.textTertiary,
+                  background: colors.surfacePrimary,
+                  border: `1px solid ${colors.toolBorder}`,
+                }}
+              >
+                Queue is empty. Add text or attachments to prepare the next send.
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Activity row — overlaps bottom of scroll area as a fade strip */}
@@ -249,32 +188,11 @@ export function ConversationView() {
             </span>
           )}
 
-          {isDead && (
-            <span style={{ color: colors.statusError, fontSize: 11 }}>Session ended unexpectedly</span>
-          )}
-
           {isFailed && (
             <span className="flex items-center gap-1.5">
               <span style={{ color: colors.statusError, fontSize: 11 }}>Failed</span>
-              <button
-                onClick={handleRetry}
-                className="flex items-center gap-1 rounded-full px-2 py-0.5 transition-colors"
-                style={{ color: colors.accent, fontSize: 11 }}
-              >
-                <ArrowCounterClockwise size={10} />
-                Retry
-              </button>
             </span>
           )}
-        </div>
-
-        {/* Right: interrupt button when running */}
-        <div className="flex items-center flex-shrink-0">
-          <AnimatePresence>
-            {showInterrupt && (
-              <InterruptButton tabId={tab.id} />
-            )}
-          </AnimatePresence>
         </div>
       </div>
     </div>
@@ -319,607 +237,218 @@ function EmptyState() {
   )
 }
 
-// ─── Copy Button ───
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
+function QueueItemCard({
+  item,
+  index,
+  total,
+  onEdit,
+  onRemove,
+  onMoveUp,
+  onMoveDown,
+}: {
+  item: QueueItem
+  index: number
+  total: number
+  onEdit: () => void
+  onRemove: () => void
+  onMoveUp: () => void
+  onMoveDown: () => void
+}) {
   const colors = useColors()
+  const label = item.type === 'text' ? 'Text' : item.type === 'screenshot' ? 'Image' : 'File'
+  const preview = item.content.length > 140 ? `${item.content.slice(0, 137)}...` : item.content
+  const [pulseMove, setPulseMove] = useState(false)
+  const [previewOpen, setPreviewOpen] = useState(false)
 
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch {}
-  }
+  useEffect(() => {
+    setPulseMove(true)
+    const timeout = setTimeout(() => setPulseMove(false), 220)
+    return () => clearTimeout(timeout)
+  }, [index])
 
   return (
-    <motion.button
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.12 }}
-      onClick={handleCopy}
-      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] cursor-pointer flex-shrink-0"
-      style={{
-        background: copied ? colors.statusCompleteBg : 'transparent',
-        color: copied ? colors.statusComplete : colors.textTertiary,
-        border: 'none',
-      }}
-      title="Copy response"
-    >
-      {copied ? <Check size={11} /> : <Copy size={11} />}
-      <span>{copied ? 'Copied' : 'Copy'}</span>
-    </motion.button>
+    <>
+      <div
+        data-no-window-drag
+        className="group rounded-2xl px-3 py-2"
+        style={{
+          background: pulseMove ? colors.surfaceHover : colors.surfacePrimary,
+          border: `1px solid ${pulseMove ? colors.accent : colors.toolBorder}`,
+          userSelect: 'none',
+          WebkitUserSelect: 'none',
+        }}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div
+            data-no-window-drag
+            className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0"
+            style={{ color: colors.textTertiary, background: colors.surfaceHover, marginTop: 2 }}
+            title="Queued item"
+          >
+            {index + 1}
+          </div>
+
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] uppercase tracking-[0.12em] mb-1" style={{ color: colors.textTertiary }}>
+              {label}
+            </div>
+            {item.type === 'screenshot' && item.metadata?.dataUrl ? (
+              <button
+                onClick={() => setPreviewOpen(true)}
+                className="w-full text-left"
+                style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer' }}
+                title="Preview image"
+              >
+                <div className="text-[13px] leading-[1.5] whitespace-pre-wrap break-words" style={{ color: colors.textPrimary }}>
+                  {preview}
+                </div>
+                <div className="text-[11px] mt-2 truncate" style={{ color: colors.textTertiary }} title={item.metadata.filePath}>
+                  {item.metadata.filePath}
+                </div>
+              </button>
+            ) : (
+              <>
+                <div className="text-[13px] leading-[1.5] whitespace-pre-wrap break-words" style={{ color: colors.textPrimary }}>
+                  {preview}
+                </div>
+                {item.metadata?.filePath && (
+                  <div className="text-[11px] mt-2 truncate" style={{ color: colors.textTertiary }} title={item.metadata.filePath}>
+                    {item.metadata.filePath}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              onClick={onMoveUp}
+              disabled={index === 0}
+              className="w-7 h-7 rounded-full flex items-center justify-center disabled:opacity-25"
+              style={{ color: colors.textSecondary, background: colors.surfaceHover }}
+              title="Move up"
+            >
+              <ArrowUp size={13} />
+            </button>
+            <button
+              onClick={onMoveDown}
+              disabled={index === total - 1}
+              className="w-7 h-7 rounded-full flex items-center justify-center disabled:opacity-25"
+              style={{ color: colors.textSecondary, background: colors.surfaceHover }}
+              title="Move down"
+            >
+              <ArrowDown size={13} />
+            </button>
+            <button
+              onClick={onEdit}
+              className="w-7 h-7 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+              style={{ color: colors.textSecondary, background: colors.surfaceHover }}
+              title="Edit queue item"
+            >
+              <PencilSimple size={13} />
+            </button>
+            <button
+              onClick={onRemove}
+              className="w-7 h-7 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+              style={{ color: colors.statusError, background: colors.statusErrorBg }}
+              title="Remove queue item"
+            >
+              <Trash size={13} />
+            </button>
+          </div>
+        </div>
+      </div>
+      {item.type === 'screenshot' && item.metadata?.dataUrl && (
+        <QueueImagePreview
+          open={previewOpen}
+          name={item.metadata.fileName || 'Image'}
+          dataUrl={item.metadata.dataUrl}
+          onClose={() => setPreviewOpen(false)}
+        />
+      )}
+    </>
   )
 }
 
-// ─── Interrupt Button ───
-
-function InterruptButton({ tabId }: { tabId: string }) {
+function QueueImagePreview({ open, name, dataUrl, onClose }: { open: boolean; name: string; dataUrl: string; onClose: () => void }) {
   const colors = useColors()
 
-  const handleStop = () => {
-    window.clui.stopTab(tabId)
-  }
-
-  return (
-    <motion.button
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.12 }}
-      onClick={handleStop}
-      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[11px] cursor-pointer flex-shrink-0 transition-colors"
-      style={{
-        background: 'transparent',
-        color: colors.statusError,
-        border: 'none',
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.background = colors.statusErrorBg }}
-      onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
-      title="Stop current task"
-    >
-      <Square size={9} weight="fill" />
-      <span>Interrupt</span>
-    </motion.button>
-  )
-}
-
-// ─── User Message ───
-
-function UserMessage({ message, skipMotion }: { message: Message; skipMotion?: boolean }) {
-  const colors = useColors()
-  const content = (
-    <div
-      className="text-[13px] leading-[1.5] px-3 py-1.5 max-w-[85%]"
-      style={{
-        background: colors.userBubble,
-        color: colors.userBubbleText,
-        border: `1px solid ${colors.userBubbleBorder}`,
-        borderRadius: '14px 14px 4px 14px',
-      }}
-    >
-      {message.content}
-    </div>
-  )
-
-  if (skipMotion) {
-    return <div className="flex justify-end py-1.5">{content}</div>
-  }
+  if (!open) return null
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.15 }}
-      className="flex justify-end py-1.5"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 flex items-center justify-center"
+      style={{ background: 'rgba(0, 0, 0, 0.55)', zIndex: 80 }}
+      onClick={onClose}
     >
-      {content}
+      <motion.div
+        initial={{ opacity: 0, scale: 0.96 }}
+        animate={{ opacity: 1, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.96 }}
+        transition={{ duration: 0.14 }}
+        className="rounded-2xl overflow-hidden"
+        style={{
+          maxWidth: 'min(80vw, 960px)',
+          maxHeight: '80vh',
+          background: colors.popoverBg,
+          border: `1px solid ${colors.popoverBorder}`,
+          boxShadow: colors.popoverShadow,
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div
+          className="px-3 py-2 flex items-center justify-between gap-3 text-[11px] font-medium"
+          style={{ color: colors.textSecondary, borderBottom: `1px solid ${colors.popoverBorder}` }}
+        >
+          <span className="truncate">{name}</span>
+          <button
+            onClick={onClose}
+            className="w-6 h-6 rounded-full flex items-center justify-center"
+            style={{ color: colors.textTertiary, background: colors.surfaceHover }}
+            title="Close preview"
+          >
+            <Trash size={12} style={{ opacity: 0 }} />
+            <X size={12} style={{ position: 'absolute' }} />
+          </button>
+        </div>
+        <img
+          src={dataUrl}
+          alt={name}
+          style={{ display: 'block', maxWidth: '100%', maxHeight: 'calc(80vh - 38px)', objectFit: 'contain' }}
+        />
+      </motion.div>
     </motion.div>
   )
 }
 
-// ─── Queued Message (waiting at bottom until processed) ───
-
-function QueuedMessage({ content }: { content: string }) {
+function SentHistoryItem({ entry }: { entry: SentEntry }) {
   const colors = useColors()
+  const label = entry.mode === 'run' ? 'Sent and Run' : 'Sent Draft'
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.95 }}
       transition={{ duration: 0.15 }}
-      className="flex justify-end py-1.5"
-    >
-      <div
-        className="text-[13px] leading-[1.5] px-3 py-1.5 max-w-[85%]"
-        style={{
-          background: colors.userBubble,
-          color: colors.userBubbleText,
-          border: `1px dashed ${colors.userBubbleBorder}`,
-          borderRadius: '14px 14px 4px 14px',
-          opacity: 0.6,
-        }}
-      >
-        {content}
-      </div>
-    </motion.div>
-  )
-}
-
-// ─── Table scroll wrapper — fade edges when horizontally scrollable ───
-
-function TableScrollWrapper({ children }: { children: React.ReactNode }) {
-  const ref = useRef<HTMLDivElement>(null)
-  const [fade, setFade] = useState<string | undefined>(undefined)
-  const prevFade = useRef<string | undefined>(undefined)
-
-  const update = useCallback(() => {
-    const el = ref.current
-    if (!el) return
-    const { scrollLeft, scrollWidth, clientWidth } = el
-    let next: string | undefined
-    if (scrollWidth <= clientWidth + 1) {
-      next = undefined
-    } else {
-      const l = scrollLeft > 1
-      const r = scrollLeft + clientWidth < scrollWidth - 1
-      next = l && r
-        ? 'linear-gradient(to right, transparent, black 24px, black calc(100% - 24px), transparent)'
-        : l
-          ? 'linear-gradient(to right, transparent, black 24px)'
-          : r
-            ? 'linear-gradient(to right, black calc(100% - 24px), transparent)'
-            : undefined
-    }
-    if (next !== prevFade.current) {
-      prevFade.current = next
-      setFade(next)
-    }
-  }, [])
-
-  useEffect(() => {
-    update()
-    const el = ref.current
-    if (!el) return
-    const ro = new ResizeObserver(update)
-    ro.observe(el)
-    const table = el.querySelector('table')
-    if (table) ro.observe(table)
-    return () => ro.disconnect()
-  }, [update])
-
-  return (
-    <div
-      ref={ref}
-      onScroll={update}
+      className="rounded-2xl px-3 py-2"
       style={{
-        overflowX: 'auto',
-        scrollbarWidth: 'thin',
-        maskImage: fade,
-        WebkitMaskImage: fade,
+        background: colors.userBubble,
+        border: `1px solid ${colors.toolBorder}`,
       }}
     >
-      <table>{children}</table>
-    </div>
-  )
-}
-
-// ─── Image card — graceful fallback when src returns 404 ───
-
-function ImageCard({ src, alt, colors }: { src?: string; alt?: string; colors: ReturnType<typeof useColors> }) {
-  const [failed, setFailed] = useState(false)
-  // Reset failed state when src changes (e.g. during streaming)
-  useEffect(() => { setFailed(false) }, [src])
-  const label = alt || 'Image'
-  const open = () => { if (src) window.clui.openExternal(String(src)) }
-
-  if (failed || !src) {
-    return (
-      <button
-        type="button"
-        className="inline-flex items-center gap-1.5 my-1 px-2.5 py-1.5 rounded-md text-[12px] cursor-pointer"
-        style={{ background: colors.surfacePrimary, color: colors.accent, border: `1px solid ${colors.toolBorder}` }}
-        onClick={open}
-        title={src}
-      >
-        <Globe size={12} />
-        Image unavailable{alt ? ` — ${alt}` : ''}
-      </button>
-    )
-  }
-
-  return (
-    <button
-      type="button"
-      className="block my-2 rounded-lg overflow-hidden border text-left cursor-pointer"
-      style={{ borderColor: colors.toolBorder, background: colors.surfacePrimary }}
-      onClick={open}
-      title={src}
-    >
-      <img
-        src={src}
-        alt={label}
-        className="block w-full max-h-[260px] object-cover"
-        loading="lazy"
-        onError={() => setFailed(true)}
-      />
-      {alt && (
-        <div className="px-2 py-1 text-[11px]" style={{ color: colors.textTertiary }}>
-          {alt}
-        </div>
-      )}
-    </button>
-  )
-}
-
-// ─── Assistant Message (memoized — only re-renders when content changes) ───
-
-const AssistantMessage = React.memo(function AssistantMessage({
-  message,
-  skipMotion,
-}: {
-  message: Message
-  skipMotion?: boolean
-}) {
-  const colors = useColors()
-
-  const markdownComponents = useMemo(() => ({
-    table: ({ children }: any) => <TableScrollWrapper>{children}</TableScrollWrapper>,
-    a: ({ href, children }: any) => (
-      <button
-        type="button"
-        className="underline decoration-dotted underline-offset-2 cursor-pointer"
-        style={{ color: colors.accent }}
-        onClick={() => {
-          if (href) window.clui.openExternal(String(href))
-        }}
-      >
-        {children}
-      </button>
-    ),
-    img: ({ src, alt }: any) => <ImageCard src={src} alt={alt} colors={colors} />,
-  }), [colors])
-
-  const inner = (
-    <div className="group/msg relative">
-      <div className="text-[13px] leading-[1.6] prose-cloud min-w-0 max-w-[92%]">
-        <Markdown remarkPlugins={REMARK_PLUGINS} components={markdownComponents}>
-          {message.content}
-        </Markdown>
+      <div className="text-[10px] uppercase tracking-[0.12em] mb-1 flex items-center gap-1" style={{ color: colors.textTertiary }}>
+        <ArrowBendUpLeft size={10} />
+        {label}
       </div>
-      {/* Copy button — always in DOM, shown via CSS :hover (no React state needed).
-          Absolute positioning so it never shifts the text layout. */}
-      {message.content.trim() && (
-        <div className="absolute bottom-0 right-0 opacity-0 group-hover/msg:opacity-100 transition-opacity duration-100">
-          <CopyButton text={message.content} />
-        </div>
-      )}
-    </div>
-  )
-
-  if (skipMotion) {
-    return <div className="py-1">{inner}</div>
-  }
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.15 }}
-      className="py-1"
-    >
-      {inner}
-    </motion.div>
-  )
-}, (prev, next) => prev.message.content === next.message.content && prev.skipMotion === next.skipMotion)
-
-// ─── Tool Group (collapsible timeline — Claude Code style) ───
-
-/** Build a short description from tool name + input for the collapsed summary */
-function toolSummary(tools: Message[]): string {
-  if (tools.length === 0) return ''
-  // Use first tool's context for summary
-  const first = tools[0]
-  const desc = getToolDescription(first.toolName || 'Tool', first.toolInput)
-  if (tools.length === 1) return desc
-  return `${desc} and ${tools.length - 1} more tool${tools.length > 2 ? 's' : ''}`
-}
-
-/** Short human-readable description from tool name + already-parsed input */
-function getToolDescriptionFromParsed(name: string, parsed: Record<string, unknown>): string {
-  const s = (v: unknown) => (typeof v === 'string' ? v : '')
-  switch (name) {
-    case 'Read': return `Read ${s(parsed.file_path) || s(parsed.path) || 'file'}`
-    case 'Edit': return `Edit ${s(parsed.file_path) || 'file'}`
-    case 'Write': return `Write ${s(parsed.file_path) || 'file'}`
-    case 'Glob': return `Search files: ${s(parsed.pattern)}`
-    case 'Grep': return `Search: ${s(parsed.pattern)}`
-    case 'Bash': {
-      const cmd = s(parsed.command)
-      return cmd.length > 60 ? `${cmd.substring(0, 57)}...` : cmd || 'Bash'
-    }
-    case 'WebSearch': return `Search: ${s(parsed.query) || s(parsed.search_query)}`
-    case 'WebFetch': return `Fetch: ${s(parsed.url)}`
-    case 'Agent': return `Agent: ${(s(parsed.prompt) || s(parsed.description)).substring(0, 50)}`
-    default: return name
-  }
-}
-
-/** Short human-readable description from tool name + input */
-function getToolDescription(name: string, input?: string): string {
-  if (!input) return name
-
-  try {
-    return getToolDescriptionFromParsed(name, JSON.parse(input))
-  } catch {
-    // Input is not JSON or is partial — show truncated raw
-    const trimmed = input.trim()
-    if (trimmed.length > 60) return `${name}: ${trimmed.substring(0, 57)}...`
-    return trimmed ? `${name}: ${trimmed}` : name
-  }
-}
-
-function ToolGroup({ tools, skipMotion }: { tools: Message[]; skipMotion?: boolean }) {
-  const hasRunning = tools.some((t) => t.toolStatus === 'running')
-  const [expanded, setExpanded] = useState(false)
-  const colors = useColors()
-
-  const isOpen = expanded || hasRunning
-
-  if (isOpen) {
-    const inner = (
-      <div className="py-1">
-        {/* Collapse header — click to close */}
-        {!hasRunning && (
-          <div
-            className="flex items-center gap-1 cursor-pointer mb-1.5"
-            onClick={() => setExpanded(false)}
-          >
-            <CaretDown size={10} style={{ color: colors.textMuted }} />
-            <span className="text-[11px]" style={{ color: colors.textMuted }}>
-              Used {tools.length} tool{tools.length !== 1 ? 's' : ''}
-            </span>
-          </div>
-        )}
-
-        {/* Timeline */}
-        <div className="relative pl-6">
-          {/* Vertical line */}
-          <div
-            className="absolute left-[10px] top-1 bottom-1 w-px"
-            style={{ background: colors.timelineLine }}
-          />
-
-          <div className="space-y-3">
-            {tools.map((tool) => {
-              const isRunning = tool.toolStatus === 'running'
-              const toolName = tool.toolName || 'Tool'
-              // Parse tool input once for both description and detail content
-              let parsedInput: Record<string, unknown> | null = null
-              if (tool.toolInput) {
-                try { parsedInput = JSON.parse(tool.toolInput) } catch { /* partial JSON */ }
-              }
-              const desc = parsedInput
-                ? getToolDescriptionFromParsed(toolName, parsedInput)
-                : getToolDescription(toolName, tool.toolInput)
-
-              return (
-                <div key={tool.id} className="relative">
-                  {/* Timeline node */}
-                  <div
-                    className="absolute -left-6 top-[1px] w-[20px] h-[20px] rounded-full flex items-center justify-center"
-                    style={{
-                      background: isRunning ? colors.toolRunningBg : colors.toolBg,
-                      border: `1px solid ${isRunning ? colors.toolRunningBorder : colors.toolBorder}`,
-                    }}
-                  >
-                    {isRunning
-                      ? <SpinnerGap size={10} className="animate-spin" style={{ color: colors.statusRunning }} />
-                      : <ToolIcon name={toolName} size={10} />
-                    }
-                  </div>
-
-                  {/* Tool description */}
-                  <div className="min-w-0">
-                    <span
-                      className="text-[12px] leading-[1.4] block truncate"
-                      style={{ color: isRunning ? colors.textSecondary : colors.textTertiary }}
-                    >
-                      {desc}
-                    </span>
-
-                    {/* Tool detail content for Edit/Write */}
-                    {!isRunning && parsedInput && (() => {
-                      const monoFont = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace'
-                      if (toolName === 'Edit' && ('old_string' in parsedInput || 'new_string' in parsedInput)) {
-                        const oldStr = typeof parsedInput.old_string === 'string' ? parsedInput.old_string : null
-                        const newStr = typeof parsedInput.new_string === 'string' ? parsedInput.new_string : null
-                        if (oldStr === null && newStr === null) return null
-                        return (
-                          <div
-                            className="mt-1 text-[11px] leading-[1.5] rounded overflow-hidden"
-                            style={{ border: `1px solid ${colors.toolBorder}` }}
-                            role="group"
-                            aria-label="Edit diff"
-                          >
-                            {oldStr !== null && (
-                              <pre
-                                className="px-2 py-1 whitespace-pre-wrap break-all overflow-y-auto"
-                                aria-label="Removed"
-                                style={{
-                                  background: colors.diffRemovedBg,
-                                  color: colors.textSecondary,
-                                  maxHeight: 120,
-                                  margin: 0,
-                                  fontFamily: monoFont,
-                                  fontSize: 10,
-                                }}
-                              ><span style={{ color: colors.textMuted, userSelect: 'none' }}>- </span>{oldStr.length > 300 ? oldStr.slice(0, 297) + '...' : oldStr}</pre>
-                            )}
-                            {newStr !== null && (
-                              <pre
-                                className="px-2 py-1 whitespace-pre-wrap break-all overflow-y-auto"
-                                aria-label="Added"
-                                style={{
-                                  background: colors.diffAddedBg,
-                                  color: colors.textSecondary,
-                                  maxHeight: 120,
-                                  margin: 0,
-                                  fontFamily: monoFont,
-                                  fontSize: 10,
-                                }}
-                              ><span style={{ color: colors.textMuted, userSelect: 'none' }}>+ </span>{newStr.length > 300 ? newStr.slice(0, 297) + '...' : newStr}</pre>
-                            )}
-                          </div>
-                        )
-                      }
-                      if (toolName === 'Write' && typeof parsedInput.content === 'string') {
-                        const content = parsedInput.content
-                        const snippet = content.length > 200 ? content.slice(0, 197) + '...' : content
-                        return (
-                          <pre
-                            className="mt-1 px-2 py-1 text-[10px] leading-[1.5] rounded whitespace-pre-wrap break-all overflow-y-auto"
-                            aria-label="File content"
-                            style={{
-                              background: colors.surfaceHover,
-                              color: colors.textSecondary,
-                              maxHeight: 120,
-                              margin: 0,
-                              marginTop: 4,
-                              fontFamily: monoFont,
-                              border: `1px solid ${colors.toolBorder}`,
-                            }}
-                          >{snippet}</pre>
-                        )
-                      }
-                      return null
-                    })()}
-
-                    {/* Result badge */}
-                    {!isRunning && (
-                      <span
-                        className="inline-block text-[10px] mt-0.5 px-1.5 py-[1px] rounded"
-                        style={{
-                          background: tool.toolStatus === 'error' ? colors.statusErrorBg : colors.surfaceHover,
-                          color: tool.toolStatus === 'error' ? colors.statusError : colors.textMuted,
-                        }}
-                      >
-                        Result
-                      </span>
-                    )}
-
-                    {isRunning && (
-                      <span className="text-[10px] mt-0.5 block" style={{ color: colors.textMuted }}>
-                        running...
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
+      <div className="text-[10px] mb-1" style={{ color: colors.textTertiary }}>
+        {new Date(entry.timestamp).toLocaleString()} · {entry.itemCount} item{entry.itemCount === 1 ? '' : 's'}
       </div>
-    )
-
-    if (skipMotion) return inner
-
-    return (
-      <motion.div
-        initial={{ opacity: 0, height: 0 }}
-        animate={{ opacity: 1, height: 'auto' }}
-        exit={{ opacity: 0, height: 0 }}
-        transition={{ duration: 0.15 }}
-      >
-        {inner}
-      </motion.div>
-    )
-  }
-
-  // Collapsed state — summary text + chevron, no container
-  const summary = toolSummary(tools)
-
-  const inner = (
-    <div
-      className="flex items-start gap-1 cursor-pointer py-[2px]"
-      onClick={() => setExpanded(true)}
-    >
-      <CaretRight size={10} className="flex-shrink-0 mt-[2px]" style={{ color: colors.textTertiary }} />
-      <span className="text-[11px] leading-[1.4]" style={{ color: colors.textTertiary }}>
-        {summary}
-      </span>
-    </div>
-  )
-
-  if (skipMotion) return <div className="py-0.5">{inner}</div>
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 4 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.12 }}
-      className="py-0.5"
-    >
-      {inner}
+      <div className="text-[13px] leading-[1.5] whitespace-pre-wrap break-words" style={{ color: colors.textPrimary }}>
+        {entry.contentPreview}
+      </div>
     </motion.div>
-  )
-}
-
-// ─── System Message ───
-
-function SystemMessage({ message, skipMotion }: { message: Message; skipMotion?: boolean }) {
-  const isError = message.content.startsWith('Error:') || message.content.includes('unexpectedly')
-  const colors = useColors()
-
-  const inner = (
-    <div
-      className="text-[11px] leading-[1.5] px-2.5 py-1 rounded-lg inline-block whitespace-pre-wrap"
-      style={{
-        background: isError ? colors.statusErrorBg : colors.surfaceHover,
-        color: isError ? colors.statusError : colors.textTertiary,
-      }}
-    >
-      {message.content}
-    </div>
-  )
-
-  if (skipMotion) return <div className="py-0.5">{inner}</div>
-
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.15 }}
-      className="py-0.5"
-    >
-      {inner}
-    </motion.div>
-  )
-}
-
-// ─── Tool Icon mapping ───
-
-function ToolIcon({ name, size = 12 }: { name: string; size?: number }) {
-  const colors = useColors()
-  const ICONS: Record<string, React.ReactNode> = {
-    Read: <FileText size={size} />,
-    Edit: <PencilSimple size={size} />,
-    Write: <FileArrowUp size={size} />,
-    Bash: <Terminal size={size} />,
-    Glob: <FolderOpen size={size} />,
-    Grep: <MagnifyingGlass size={size} />,
-    WebSearch: <Globe size={size} />,
-    WebFetch: <Globe size={size} />,
-    Agent: <Robot size={size} />,
-    AskUserQuestion: <Question size={size} />,
-  }
-
-  return (
-    <span className="flex items-center" style={{ color: colors.textTertiary }}>
-      {ICONS[name] || <Wrench size={size} />}
-    </span>
   )
 }

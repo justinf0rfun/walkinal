@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
-import { DotsThree, Bell, ArrowsOutSimple, Moon } from '@phosphor-icons/react'
+import { DotsThree, Bell, ArrowsOutSimple, Moon, FolderOpen } from '@phosphor-icons/react'
 import { useThemeStore } from '../theme'
 import { useSessionStore } from '../stores/sessionStore'
 import { usePopoverLayer } from './PopoverLayer'
@@ -51,6 +51,8 @@ export function SettingsPopover() {
   const expandedUI = useThemeStore((s) => s.expandedUI)
   const setExpandedUI = useThemeStore((s) => s.setExpandedUI)
   const isExpanded = useSessionStore((s) => s.isExpanded)
+  const walkinalConfig = useSessionStore((s) => s.walkinalConfig)
+  const setWalkinalStorageDir = useSessionStore((s) => s.setWalkinalStorageDir)
   const popoverLayer = usePopoverLayer()
   const colors = useColors()
 
@@ -123,6 +125,12 @@ export function SettingsPopover() {
   const handleToggle = () => {
     if (!open) updatePos()
     setOpen((o) => !o)
+  }
+
+  const handleChooseStorageDir = async () => {
+    const dir = await window.clui.selectDirectory()
+    if (!dir) return
+    await setWalkinalStorageDir(dir)
   }
 
   return (
@@ -199,6 +207,39 @@ export function SettingsPopover() {
                   colors={colors}
                   label="Toggle notification sound"
                 />
+              </div>
+            </div>
+
+            <div style={{ height: 1, background: colors.popoverBorder }} />
+
+            <div>
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-2 min-w-0">
+                  <FolderOpen size={14} style={{ color: colors.textTertiary, marginTop: 1 }} />
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-medium" style={{ color: colors.textPrimary }}>
+                      Storage folder
+                    </div>
+                    <div
+                      className="text-[10px] mt-0.5 break-all leading-[1.4]"
+                      style={{ color: colors.textTertiary }}
+                      title={walkinalConfig?.storageDir || ''}
+                    >
+                      {walkinalConfig?.storageDir || 'Loading...'}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => { void handleChooseStorageDir() }}
+                  className="text-[11px] font-medium px-2.5 py-1 rounded-full transition-colors flex-shrink-0"
+                  style={{
+                    background: colors.surfaceHover,
+                    color: colors.accent,
+                    border: `1px solid ${colors.popoverBorder}`,
+                  }}
+                >
+                  Change
+                </button>
               </div>
             </div>
 

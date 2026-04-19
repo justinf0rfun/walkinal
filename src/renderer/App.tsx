@@ -7,23 +7,19 @@ import { InputBar } from './components/InputBar'
 import { StatusBar } from './components/StatusBar'
 import { MarketplacePanel } from './components/MarketplacePanel'
 import { PopoverLayerProvider } from './components/PopoverLayer'
-import { useClaudeEvents } from './hooks/useClaudeEvents'
-import { useHealthReconciliation } from './hooks/useHealthReconciliation'
 import { useSessionStore } from './stores/sessionStore'
 import { useColors, useThemeStore, spacing } from './theme'
 
 const TRANSITION = { duration: 0.26, ease: [0.4, 0, 0.1, 1] as const }
+let bootstrapStarted = false
 
 export default function App() {
-  useClaudeEvents()
-  useHealthReconciliation()
-
+  const draftsReady = useSessionStore((s) => s.draftsReady)
   const activeTabStatus = useSessionStore((s) => s.tabs.find((t) => t.id === s.activeTabId)?.status)
   const addAttachments = useSessionStore((s) => s.addAttachments)
   const colors = useColors()
   const setSystemTheme = useThemeStore((s) => s.setSystemTheme)
   const expandedUI = useThemeStore((s) => s.expandedUI)
-
   // ─── Theme initialization ───
   useEffect(() => {
     // Get initial OS theme — setSystemTheme respects themeMode (system/light/dark)
@@ -39,22 +35,53 @@ export default function App() {
   }, [setSystemTheme])
 
   useEffect(() => {
+    if (bootstrapStarted) return
+    bootstrapStarted = true
+    console.log('[walkinal] bootstrap:start')
+
     useSessionStore.getState().initStaticInfo().then(() => {
+      useSessionStore.getState().loadWalkinalConfig().catch(() => {})
       const homeDir = useSessionStore.getState().staticInfo?.homePath || '~'
-      const tab = useSessionStore.getState().tabs[0]
-      if (tab) {
-        // Set working directory to home by default (user hasn't chosen yet)
-        useSessionStore.setState((s) => ({
-          tabs: s.tabs.map((t, i) => (i === 0 ? { ...t, workingDirectory: homeDir, hasChosenDirectory: false } : t)),
-        }))
-        window.clui.createTab().then(({ tabId }) => {
-          useSessionStore.setState((s) => ({
-            tabs: s.tabs.map((t, i) => (i === 0 ? { ...t, id: tabId } : t)),
-            activeTabId: tabId,
-          }))
-        }).catch(() => {})
-      }
+      useSessionStore.getState().loadDrafts(homeDir).then((restored) => {
+        console.log('[walkinal] bootstrap:loadDraftsResult', { restored, homeDir })
+        if (restored) {
+          useSessionStore.getState().setDraftsReady(true)
+          console.log('[walkinal] bootstrap:ready from drafts')
+          return
+        }
+
+        useSessionStore.getState().createTab().then(() => {
+          useSessionStore.getState().setDraftsReady(true)
+          console.log('[walkinal] bootstrap:ready fallback created tab')
+        }).catch(() => {
+          useSessionStore.getState().setDraftsReady(true)
+          console.log('[walkinal] bootstrap:ready fallback createTab error')
+        })
+      }).catch(() => {
+        useSessionStore.getState().setDraftsReady(true)
+        console.log('[walkinal] bootstrap:ready after loadDrafts error')
+      })
     })
+  }, [])
+
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      useSessionStore.getState().persistDrafts().catch(() => {})
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        useSessionStore.getState().persistDrafts().catch(() => {})
+      }
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
   }, [])
 
   // Shared drag ref — must be declared before the setIgnoreMouseEvents effect so both closures can read it
@@ -113,6 +140,7 @@ export default function App() {
       const el = e.target as HTMLElement
       // Skip interactive elements — everything else on the card is draggable
       if (el.closest('button, input, textarea, a, select, [role="button"], [contenteditable], .cm-editor')) return
+      if (el.closest('[data-no-window-drag]')) return
       if (!el.closest('[data-clui-ui]')) return
       e.preventDefault()
       // Double-click: snap back to default position
@@ -205,6 +233,10 @@ export default function App() {
     if (!files || files.length === 0) return
     addAttachments(files)
   }, [addAttachments])
+
+  if (!draftsReady) {
+    return null
+  }
 
   return (
     <PopoverLayerProvider>

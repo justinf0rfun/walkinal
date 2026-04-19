@@ -1,133 +1,4 @@
-// ─── Claude Code Stream Event Types (verified from v2.1.63) ───
-
-export interface InitEvent {
-  type: 'system'
-  subtype: 'init'
-  cwd: string
-  session_id: string
-  tools: string[]
-  mcp_servers: Array<{ name: string; status: string }>
-  model: string
-  permissionMode: string
-  agents: string[]
-  skills: string[]
-  plugins: string[]
-  claude_code_version: string
-  fast_mode_state: string
-  uuid: string
-}
-
-export interface StreamEvent {
-  type: 'stream_event'
-  event: StreamSubEvent
-  session_id: string
-  parent_tool_use_id: string | null
-  uuid: string
-}
-
-export type StreamSubEvent =
-  | { type: 'message_start'; message: AssistantMessagePayload }
-  | { type: 'content_block_start'; index: number; content_block: ContentBlock }
-  | { type: 'content_block_delta'; index: number; delta: ContentDelta }
-  | { type: 'content_block_stop'; index: number }
-  | { type: 'message_delta'; delta: { stop_reason: string | null }; usage: UsageData; context_management?: unknown }
-  | { type: 'message_stop' }
-
-export interface ContentBlock {
-  type: 'text' | 'tool_use'
-  text?: string
-  id?: string
-  name?: string
-  input?: Record<string, unknown>
-}
-
-export type ContentDelta =
-  | { type: 'text_delta'; text: string }
-  | { type: 'input_json_delta'; partial_json: string }
-
-export interface AssistantEvent {
-  type: 'assistant'
-  message: AssistantMessagePayload
-  parent_tool_use_id: string | null
-  session_id: string
-  uuid: string
-}
-
-export interface AssistantMessagePayload {
-  model: string
-  id: string
-  role: 'assistant'
-  content: ContentBlock[]
-  stop_reason: string | null
-  usage: UsageData
-}
-
-export interface RateLimitEvent {
-  type: 'rate_limit_event'
-  rate_limit_info: {
-    status: string
-    resetsAt: number
-    rateLimitType: string
-  }
-  session_id: string
-  uuid: string
-}
-
-export interface ResultEvent {
-  type: 'result'
-  subtype: 'success' | 'error'
-  is_error: boolean
-  duration_ms: number
-  num_turns: number
-  result: string
-  total_cost_usd: number
-  session_id: string
-  usage: UsageData & {
-    input_tokens: number
-    output_tokens: number
-    cache_read_input_tokens?: number
-    cache_creation_input_tokens?: number
-  }
-  permission_denials: string[]
-  uuid: string
-}
-
-export interface UsageData {
-  input_tokens?: number
-  output_tokens?: number
-  cache_read_input_tokens?: number
-  cache_creation_input_tokens?: number
-  service_tier?: string
-}
-
-export interface PermissionEvent {
-  type: 'permission_request'
-  tool: { name: string; description?: string; input?: Record<string, unknown> }
-  question_id: string
-  options: Array<{ id: string; label: string; kind?: string }>
-  session_id: string
-  uuid: string
-}
-
-// Union of all possible top-level events
-export type ClaudeEvent = InitEvent | StreamEvent | AssistantEvent | RateLimitEvent | ResultEvent | PermissionEvent | UnknownEvent
-
-export interface UnknownEvent {
-  type: string
-  [key: string]: unknown
-}
-
-// ─── Tab State Machine (v2 — from execution plan) ───
-
 export type TabStatus = 'connecting' | 'idle' | 'running' | 'completed' | 'failed' | 'dead'
-
-export interface PermissionRequest {
-  questionId: string
-  toolTitle: string
-  toolDescription?: string
-  toolInput?: Record<string, unknown>
-  options: Array<{ optionId: string; kind?: string; label: string }>
-}
 
 export interface Attachment {
   id: string
@@ -143,136 +14,22 @@ export interface Attachment {
 
 export interface TabState {
   id: string
-  claudeSessionId: string | null
   status: TabStatus
-  activeRequestId: string | null
   hasUnread: boolean
   currentActivity: string
-  permissionQueue: PermissionRequest[]
-  /** Fallback card when tools were denied and no interactive permission is available */
-  permissionDenied: { tools: Array<{ toolName: string; toolUseId: string }> } | null
-  attachments: Attachment[]
-  messages: Message[]
   title: string
-  /** Last run's result data (cost, tokens, duration) */
-  lastResult: RunResult | null
-  /** Session metadata from init event */
-  sessionModel: string | null
-  sessionTools: string[]
-  sessionMcpServers: Array<{ name: string; status: string }>
-  sessionSkills: string[]
-  sessionVersion: string | null
-  /** Prompts waiting behind the current run (display text only) */
-  queuedPrompts: string[]
   /** Working directory for this tab's Claude sessions */
   workingDirectory: string
   /** Whether the user explicitly chose a directory (vs. using default home) */
   hasChosenDirectory: boolean
   /** Extra directories accessible via --add-dir (session-preserving) */
   additionalDirs: string[]
-}
-
-export interface Message {
-  id: string
-  role: 'user' | 'assistant' | 'tool' | 'system'
-  content: string
-  toolName?: string
-  toolInput?: string
-  toolStatus?: 'running' | 'completed' | 'error'
-  timestamp: number
-}
-
-export interface RunResult {
-  totalCostUsd: number
-  durationMs: number
-  numTurns: number
-  usage: UsageData
-  sessionId: string
-}
-
-// ─── Canonical Events (normalized from raw stream) ───
-
-export type NormalizedEvent =
-  | { type: 'session_init'; sessionId: string; tools: string[]; model: string; mcpServers: Array<{ name: string; status: string }>; skills: string[]; version: string; isWarmup?: boolean }
-  | { type: 'text_chunk'; text: string }
-  | { type: 'tool_call'; toolName: string; toolId: string; index: number }
-  | { type: 'tool_call_update'; toolId: string; partialInput: string }
-  | { type: 'tool_call_complete'; index: number }
-  | { type: 'task_update'; message: AssistantMessagePayload }
-  | { type: 'task_complete'; result: string; costUsd: number; durationMs: number; numTurns: number; usage: UsageData; sessionId: string; permissionDenials?: Array<{ toolName: string; toolUseId: string }> }
-  | { type: 'error'; message: string; isError: boolean; sessionId?: string }
-  | { type: 'session_dead'; exitCode: number | null; signal: string | null; stderrTail: string[] }
-  | { type: 'rate_limit'; status: string; resetsAt: number; rateLimitType: string }
-  | { type: 'usage'; usage: UsageData }
-  | { type: 'permission_request'; questionId: string; toolName: string; toolDescription?: string; toolInput?: Record<string, unknown>; options: Array<{ id: string; label: string; kind?: string }> }
-
-// ─── Run Options ───
-
-export interface RunOptions {
-  prompt: string
-  projectPath: string
-  sessionId?: string
-  allowedTools?: string[]
-  maxTurns?: number
-  maxBudgetUsd?: number
-  systemPrompt?: string
-  model?: string
-  /** Path to CLUI-scoped settings file with hook config (passed via --settings) */
-  hookSettingsPath?: string
-  /** Extra directories to add via --add-dir (session-preserving) */
-  addDirs?: string[]
-}
-
-// ─── Control Plane Types ───
-
-export interface TabRegistryEntry {
-  tabId: string
-  claudeSessionId: string | null
-  status: TabStatus
-  activeRequestId: string | null
-  runPid: number | null
-  createdAt: number
-  lastActivityAt: number
-  promptCount: number
-}
-
-export interface HealthReport {
-  tabs: Array<{
-    tabId: string
-    status: TabStatus
-    activeRequestId: string | null
-    claudeSessionId: string | null
-    alive: boolean
-  }>
-  queueDepth: number
-}
-
-export interface EnrichedError {
-  message: string
-  stderrTail: string[]
-  stdoutTail?: string[]
-  exitCode: number | null
-  elapsedMs: number
-  toolCallCount: number
-  sawPermissionRequest?: boolean
-  permissionDenials?: Array<{ tool_name: string; tool_use_id: string }>
-}
-
-// ─── Session History ───
-
-export interface SessionMeta {
-  sessionId: string
-  slug: string | null
-  firstMessage: string | null
-  lastTimestamp: string
-  size: number
-}
-
-export interface SessionLoadMessage {
-  role: string
-  content: string
-  toolName?: string
-  timestamp: number
+  /** Pending attachments shown above the input bar */
+  attachments: Attachment[]
+  /** Walkinal draft queue items */
+  queueItems: QueueItem[]
+  /** Recent sent entries for this tab, persisted with drafts */
+  sentEntries: SentEntry[]
 }
 
 // ─── Marketplace / Plugin Types ───
@@ -294,18 +51,121 @@ export interface CatalogPlugin {
   isSkillMd: boolean      // true = individual SKILL.md (direct install), false = CLI plugin (bundle install)
 }
 
+// ─── Walkinal Draft / History Types ───
+
+export type QueueItemType = 'text' | 'file' | 'screenshot'
+
+export interface QueueItem {
+  id: string
+  type: QueueItemType
+  content: string
+  createdAt: number
+  metadata?: {
+    filePath?: string
+    fileName?: string
+    mimeType?: string
+    size?: number
+    preview?: string
+    dataUrl?: string
+  }
+}
+
+export interface DraftTabState {
+  id: string
+  title: string
+  attachments: Attachment[]
+  queue: QueueItem[]
+  sentEntries: SentEntry[]
+  draftInput: string
+  hasUnread: boolean
+  workingDirectory: string
+  additionalDirs: string[]
+  lastSend?: {
+    sentAt: number
+    itemCount: number
+    charCount: number
+    target: 'warp'
+  } | null
+}
+
+export interface DraftsFile {
+  activeTabId: string
+  tabs: DraftTabState[]
+}
+
+export interface HistoryEntry {
+  id: string
+  timestamp: string
+  title: string
+  content: string
+  itemCount: number
+  mode?: 'draft' | 'run'
+  target: 'warp'
+  workingDirectory?: string
+  favorite?: boolean
+  tags?: string[]
+}
+
+export interface HistoryIndexEntry {
+  id: string
+  timestamp: string
+  title: string
+  contentPreview: string
+  itemCount: number
+  mode: 'draft' | 'run'
+  target: 'warp'
+}
+
+export interface SentEntry {
+  id: string
+  historyId: string
+  timestamp: string
+  title: string
+  contentPreview: string
+  itemCount: number
+  mode: 'draft' | 'run'
+}
+
+export interface WalkinalConfig {
+  storageDir: string
+  terminalTarget: 'warp'
+}
+
+export interface WalkinalSendRequest {
+  requestId: string
+  text: string
+  imagePaths?: string[]
+  steps?: Array<
+    | { type: 'text'; text: string }
+    | { type: 'image'; path: string }
+  >
+  title?: string
+  itemCount: number
+  workingDirectory?: string
+}
+
+export interface WalkinalSendResult {
+  ok: boolean
+  error?: string
+}
+
+export interface WalkinalHistoryAppendRequest {
+  entry: HistoryEntry
+}
+
+export interface WalkinalHistoryIndexListRequest {
+  limit?: number
+  offset?: number
+  query?: string
+  mode?: 'all' | 'draft' | 'run'
+}
+
 // ─── IPC Channel Names ───
 
 export const IPC = {
   // Request-response (renderer → main)
   START: 'clui:start',
   CREATE_TAB: 'clui:create-tab',
-  PROMPT: 'clui:prompt',
-  CANCEL: 'clui:cancel',
-  STOP_TAB: 'clui:stop-tab',
-  RETRY: 'clui:retry',
-  STATUS: 'clui:status',
-  TAB_HEALTH: 'clui:tab-health',
   CLOSE_TAB: 'clui:close-tab',
   SELECT_DIRECTORY: 'clui:select-directory',
   OPEN_EXTERNAL: 'clui:open-external',
@@ -315,24 +175,9 @@ export const IPC = {
   TRANSCRIBE_AUDIO: 'clui:transcribe-audio',
   PASTE_IMAGE: 'clui:paste-image',
   GET_DIAGNOSTICS: 'clui:get-diagnostics',
-  RESPOND_PERMISSION: 'clui:respond-permission',
   INIT_SESSION: 'clui:init-session',
   RESET_TAB_SESSION: 'clui:reset-tab-session',
   ANIMATE_HEIGHT: 'clui:animate-height',
-  LIST_SESSIONS: 'clui:list-sessions',
-  LOAD_SESSION: 'clui:load-session',
-
-  // One-way events (main → renderer)
-  TEXT_CHUNK: 'clui:text-chunk',
-  TOOL_CALL: 'clui:tool-call',
-  TOOL_CALL_UPDATE: 'clui:tool-call-update',
-  TOOL_CALL_COMPLETE: 'clui:tool-call-complete',
-  TASK_UPDATE: 'clui:task-update',
-  TASK_COMPLETE: 'clui:task-complete',
-  SESSION_DEAD: 'clui:session-dead',
-  SESSION_INIT: 'clui:session-init',
-  ERROR: 'clui:error',
-  RATE_LIMIT: 'clui:rate-limit',
 
   // Window management
   RESIZE_HEIGHT: 'clui:resize-height',
@@ -357,11 +202,16 @@ export const IPC = {
   MARKETPLACE_INSTALL: 'clui:marketplace-install',
   MARKETPLACE_UNINSTALL: 'clui:marketplace-uninstall',
 
-  // Permission mode
-  SET_PERMISSION_MODE: 'clui:set-permission-mode',
-
-  // Legacy (kept for backward compat during migration)
-  STREAM_EVENT: 'clui:stream-event',
-  RUN_COMPLETE: 'clui:run-complete',
-  RUN_ERROR: 'clui:run-error',
+  // Walkinal draft / history / bridge
+  WALKINAL_GET_CONFIG: 'clui:walkinal-get-config',
+  WALKINAL_SET_CONFIG: 'clui:walkinal-set-config',
+  WALKINAL_DRAFTS_LOAD: 'clui:walkinal-drafts-load',
+  WALKINAL_DRAFTS_SAVE: 'clui:walkinal-drafts-save',
+  WALKINAL_HISTORY_LIST: 'clui:walkinal-history-list',
+  WALKINAL_HISTORY_IMPORT: 'clui:walkinal-history-import',
+  WALKINAL_HISTORY_APPEND: 'clui:walkinal-history-append',
+  WALKINAL_HISTORY_INDEX_LIST: 'clui:walkinal-history-index-list',
+  WALKINAL_QUEUE_SEND_DRAFT: 'clui:walkinal-queue-send-draft',
+  WALKINAL_QUEUE_SEND_AND_RUN: 'clui:walkinal-queue-send-and-run',
+  WALKINAL_QUEUE_SEND: 'clui:walkinal-queue-send',
 } as const

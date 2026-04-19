@@ -1,9 +1,8 @@
 import React, { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Microphone, ArrowUp, SpinnerGap, X, Check } from '@phosphor-icons/react'
-import { useSessionStore, AVAILABLE_MODELS } from '../stores/sessionStore'
+import { useSessionStore } from '../stores/sessionStore'
 import { AttachmentChips } from './AttachmentChips'
-import { SlashCommandMenu, getFilteredCommandsWithExtras, type SlashCommand } from './SlashCommandMenu'
 import { useColors } from '../theme'
 
 const INPUT_MIN_HEIGHT = 20
@@ -11,7 +10,8 @@ const INPUT_MAX_HEIGHT = 140
 const MULTILINE_ENTER_HEIGHT = 52
 const MULTILINE_EXIT_HEIGHT = 50
 const INLINE_CONTROLS_RESERVED_WIDTH = 104
-
+const ACTION_HINT_IDLE_MS = 600
+const ACTION_HINT_VISIBLE_MS = 3000
 type VoiceState = 'idle' | 'recording' | 'transcribing'
 
 /**
@@ -22,38 +22,33 @@ export function InputBar() {
   const [input, setInput] = useState('')
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
   const [voiceError, setVoiceError] = useState<string | null>(null)
-  const [slashFilter, setSlashFilter] = useState<string | null>(null)
-  const [slashIndex, setSlashIndex] = useState(0)
   const [isMultiLine, setIsMultiLine] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [showActionHints, setShowActionHints] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const wrapperRef = useRef<HTMLDivElement>(null)
   const measureRef = useRef<HTMLTextAreaElement | null>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
+  const submitLockRef = useRef(false)
+  const hintIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const hintHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const sendMessage = useSessionStore((s) => s.sendMessage)
-  const clearTab = useSessionStore((s) => s.clearTab)
-  const addSystemMessage = useSessionStore((s) => s.addSystemMessage)
+  const enqueueDraft = useSessionStore((s) => s.enqueueDraft)
+  const sendQueuedItems = useSessionStore((s) => s.sendQueuedItems)
   const addAttachments = useSessionStore((s) => s.addAttachments)
   const removeAttachment = useSessionStore((s) => s.removeAttachment)
-
-  const setPreferredModel = useSessionStore((s) => s.setPreferredModel)
-  const staticInfo = useSessionStore((s) => s.staticInfo)
-  const preferredModel = useSessionStore((s) => s.preferredModel)
   const activeTabId = useSessionStore((s) => s.activeTabId)
   const tab = useSessionStore((s) => s.tabs.find((t) => t.id === s.activeTabId))
   const colors = useColors()
-  const isBusy = tab?.status === 'running' || tab?.status === 'connecting'
+  const isBusy = isSubmitting || tab?.status === 'running' || tab?.status === 'connecting'
   const isConnecting = tab?.status === 'connecting'
-  const hasContent = input.trim().length > 0 || (tab?.attachments?.length ?? 0) > 0
-  const canSend = !!tab && !isConnecting && hasContent
+  const queueCount = tab?.queueItems.length ?? 0
   const attachments = tab?.attachments || []
-  const showSlashMenu = slashFilter !== null && !isConnecting
-  const skillCommands: SlashCommand[] = (tab?.sessionSkills || []).map((skill) => ({
-    command: `/${skill}`,
-    description: `Run skill: ${skill}`,
-    icon: <span className="text-[11px]">✦</span>,
-  }))
+  const hasContent = input.trim().length > 0 || queueCount > 0 || attachments.length > 0
+  const hasPendingComposerContent = input.trim().length > 0 || attachments.length > 0
+  const canSend = !!tab && !isConnecting && hasContent
+  const canQueue = !!tab && !isConnecting && hasPendingComposerContent
 
   useEffect(() => {
     textareaRef.current?.focus()
@@ -65,6 +60,19 @@ export function InputBar() {
       textareaRef.current?.focus()
     })
     return unsub
+  }, [])
+
+  useEffect(() => {
+    const onSetInput = (event: Event) => {
+      const custom = event as CustomEvent<string>
+      if (typeof custom.detail === 'string') {
+        setInput(custom.detail)
+        requestAnimationFrame(() => textareaRef.current?.focus())
+      }
+    }
+
+    window.addEventListener('walkinal:set-input', onSetInput as EventListener)
+    return () => window.removeEventListener('walkinal:set-input', onSetInput as EventListener)
   }, [])
 
   const measureInlineHeight = useCallback((value: string): number => {
@@ -130,9 +138,13 @@ export function InputBar() {
       if (!prev) return inlineHeight > MULTILINE_ENTER_HEIGHT
       return inlineHeight > MULTILINE_EXIT_HEIGHT
     })
-  }, [input, measureInlineHeight])
+    if (!input) {
+      el.scrollLeft = 0
+      el.scrollTop = 0
+    }
+  }, [attachments.length, input, measureInlineHeight])
 
-  useLayoutEffect(() => { autoResize() }, [input, isMultiLine, autoResize])
+  useLayoutEffect(() => { autoResize() }, [attachments.length, input, isMultiLine, autoResize])
 
   useEffect(() => {
     return () => {
@@ -143,162 +155,98 @@ export function InputBar() {
         measureRef.current.remove()
         measureRef.current = null
       }
+      if (hintIdleTimerRef.current) clearTimeout(hintIdleTimerRef.current)
+      if (hintHideTimerRef.current) clearTimeout(hintHideTimerRef.current)
     }
   }, [])
 
-  // ─── Slash command detection ───
-  const updateSlashFilter = useCallback((value: string) => {
-    const match = value.match(/^(\/[a-zA-Z-]*)$/)
-    if (match) {
-      setSlashFilter(match[1])
-      setSlashIndex(0)
-    } else {
-      setSlashFilter(null)
+  const hideActionHints = useCallback(() => {
+    setShowActionHints(false)
+    if (hintIdleTimerRef.current) {
+      clearTimeout(hintIdleTimerRef.current)
+      hintIdleTimerRef.current = null
+    }
+    if (hintHideTimerRef.current) {
+      clearTimeout(hintHideTimerRef.current)
+      hintHideTimerRef.current = null
     }
   }, [])
 
-  // ─── Handle slash commands ───
-  const executeCommand = useCallback((cmd: SlashCommand) => {
-    switch (cmd.command) {
-      case '/clear':
-        clearTab()
-        addSystemMessage('Conversation cleared.')
-        break
-      case '/cost': {
-        if (tab?.lastResult) {
-          const r = tab.lastResult
-          const parts = [`$${r.totalCostUsd.toFixed(4)}`, `${(r.durationMs / 1000).toFixed(1)}s`, `${r.numTurns} turn${r.numTurns !== 1 ? 's' : ''}`]
-          if (r.usage.input_tokens) {
-            parts.push(`${r.usage.input_tokens.toLocaleString()} in / ${(r.usage.output_tokens || 0).toLocaleString()} out`)
-          }
-          addSystemMessage(parts.join(' · '))
-        } else {
-          addSystemMessage('No cost data yet — send a message first.')
-        }
-        break
-      }
-      case '/model': {
-        const model = tab?.sessionModel || null
-        const version = tab?.sessionVersion || staticInfo?.version || null
-        const current = preferredModel || model || 'default'
-        const lines = AVAILABLE_MODELS.map((m) => {
-          const active = m.id === current || (!preferredModel && m.id === model)
-          return `  ${active ? '\u25CF' : '\u25CB'} ${m.label} (${m.id})`
-        })
-        const header = version ? `Claude Code ${version}` : 'Claude Code'
-        addSystemMessage(`${header}\n\n${lines.join('\n')}\n\nSwitch model: type /model <name>\n  e.g. /model sonnet`)
-        break
-      }
-      case '/mcp': {
-        if (tab?.sessionMcpServers && tab.sessionMcpServers.length > 0) {
-          const lines = tab.sessionMcpServers.map((s) => {
-            const icon = s.status === 'connected' ? '\u2713' : s.status === 'failed' ? '\u2717' : '\u25CB'
-            return `  ${icon} ${s.name} — ${s.status}`
-          })
-          addSystemMessage(`MCP Servers (${tab.sessionMcpServers.length}):\n${lines.join('\n')}`)
-        } else if (tab?.claudeSessionId) {
-          addSystemMessage('No MCP servers connected in this session.')
-        } else {
-          addSystemMessage('No MCP data yet — send a message to start a session.')
-        }
-        break
-      }
-      case '/skills': {
-        if (tab?.sessionSkills && tab.sessionSkills.length > 0) {
-          const lines = tab.sessionSkills.map((s) => `/${s}`)
-          addSystemMessage(`Available skills (${tab.sessionSkills.length}):\n${lines.join('\n')}`)
-        } else if (tab?.claudeSessionId) {
-          addSystemMessage('No skills available in this session.')
-        } else {
-          addSystemMessage('No session metadata yet — send a message first.')
-        }
-        break
-      }
-      case '/help': {
-        const lines = [
-          '/clear — Clear conversation history',
-          '/cost — Show token usage and cost',
-          '/model — Show model info & switch models',
-          '/mcp — Show MCP server status',
-          '/skills — Show available skills',
-          '/help — Show this list',
-        ]
-        addSystemMessage(lines.join('\n'))
-        break
-      }
-    }
-  }, [tab, clearTab, addSystemMessage, staticInfo, preferredModel])
-
-  const handleSlashSelect = useCallback((cmd: SlashCommand) => {
-    const isSkillCommand = !!tab?.sessionSkills?.includes(cmd.command.replace(/^\//, ''))
-    if (isSkillCommand) {
-      setInput(`${cmd.command} `)
-      setSlashFilter(null)
-      requestAnimationFrame(() => textareaRef.current?.focus())
+  useEffect(() => {
+    if (!hasPendingComposerContent || isBusy || isConnecting || voiceState !== 'idle') {
+      hideActionHints()
       return
     }
-    setInput('')
-    setSlashFilter(null)
-    executeCommand(cmd)
-  }, [executeCommand, tab?.sessionSkills])
+
+    setShowActionHints(false)
+    if (hintIdleTimerRef.current) clearTimeout(hintIdleTimerRef.current)
+    if (hintHideTimerRef.current) clearTimeout(hintHideTimerRef.current)
+
+    hintIdleTimerRef.current = setTimeout(() => {
+      setShowActionHints(true)
+      hintHideTimerRef.current = setTimeout(() => {
+        setShowActionHints(false)
+      }, ACTION_HINT_VISIBLE_MS)
+    }, ACTION_HINT_IDLE_MS)
+
+    return () => {
+      if (hintIdleTimerRef.current) clearTimeout(hintIdleTimerRef.current)
+      if (hintHideTimerRef.current) clearTimeout(hintHideTimerRef.current)
+    }
+  }, [attachments.length, hasPendingComposerContent, hideActionHints, input, isBusy, isConnecting, voiceState])
 
   // ─── Send ───
-  const handleSend = useCallback(() => {
-    if (showSlashMenu) {
-      const filtered = getFilteredCommandsWithExtras(slashFilter!, skillCommands)
-      if (filtered.length > 0) {
-        handleSlashSelect(filtered[slashIndex])
-        return
-      }
-    }
+  const handleQueue = useCallback(() => {
+    hideActionHints()
     const prompt = input.trim()
-    const modelMatch = prompt.match(/^\/model\s+(\S+)/i)
-    if (modelMatch) {
-      const query = modelMatch[1].toLowerCase()
-      const match = AVAILABLE_MODELS.find((m: { id: string; label: string }) =>
-        m.id.toLowerCase().includes(query) || m.label.toLowerCase().includes(query)
-      )
-      if (match) {
-        setPreferredModel(match.id)
-        setInput('')
-        setSlashFilter(null)
-        addSystemMessage(`Model switched to ${match.label} (${match.id})`)
-      } else {
-        setInput('')
-        setSlashFilter(null)
-        addSystemMessage(`Unknown model "${modelMatch[1]}". Available: opus, sonnet, haiku`)
-      }
-      return
-    }
     if (!prompt && attachments.length === 0) return
-    if (isConnecting) return
+    enqueueDraft(prompt)
     setInput('')
-    setSlashFilter(null)
     if (textareaRef.current) {
       textareaRef.current.style.height = `${INPUT_MIN_HEIGHT}px`
     }
-    sendMessage(prompt || 'See attached files')
-    // Refocus after React re-renders from the state update
-    requestAnimationFrame(() => textareaRef.current?.focus())
-  }, [input, isBusy, sendMessage, attachments.length, showSlashMenu, slashFilter, slashIndex, handleSlashSelect])
+  }, [attachments.length, enqueueDraft, input])
+
+  const handleSend = useCallback(async (run: boolean) => {
+    if (submitLockRef.current) return
+    hideActionHints()
+    const prompt = input.trim()
+    if (!prompt && queueCount === 0 && attachments.length === 0) return
+    if (isConnecting) return
+    if (prompt || attachments.length > 0) {
+      enqueueDraft(prompt)
+      setInput('')
+      if (textareaRef.current) {
+        textareaRef.current.style.height = `${INPUT_MIN_HEIGHT}px`
+      }
+    }
+    submitLockRef.current = true
+    setIsSubmitting(true)
+    try {
+      await sendQueuedItems(run)
+    } finally {
+      submitLockRef.current = false
+      setIsSubmitting(false)
+    }
+  }, [attachments.length, enqueueDraft, hideActionHints, input, isConnecting, queueCount, sendQueuedItems])
 
   // ─── Keyboard ───
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (showSlashMenu) {
-      const filtered = getFilteredCommandsWithExtras(slashFilter!, skillCommands)
-      if (e.key === 'ArrowDown') { e.preventDefault(); setSlashIndex((i) => (i + 1) % filtered.length); return }
-      if (e.key === 'ArrowUp') { e.preventDefault(); setSlashIndex((i) => (i - 1 + filtered.length) % filtered.length); return }
-      if (e.key === 'Tab') { e.preventDefault(); if (filtered.length > 0) handleSlashSelect(filtered[slashIndex]); return }
-      if (e.key === 'Escape') { e.preventDefault(); setSlashFilter(null); return }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      if (e.repeat) return
+      if (e.metaKey || e.ctrlKey) {
+        void handleSend(true)
+      } else {
+        handleQueue()
+      }
     }
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
-    if (e.key === 'Escape' && !showSlashMenu) { window.clui.hideWindow() }
+    if (e.key === 'Escape') { window.clui.hideWindow() }
   }
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const value = e.target.value
-    setInput(value)
-    updateSlashFilter(value)
+    setShowActionHints(false)
+    setInput(e.target.value)
   }
 
   // ─── Paste image ───
@@ -373,26 +321,10 @@ export function InputBar() {
     else if (voiceState === 'idle') void startRecording()
   }, [voiceState, startRecording, stopRecording])
 
-  const hasAttachments = attachments.length > 0
-
   return (
     <div ref={wrapperRef} data-clui-ui className="flex flex-col w-full relative">
-      {/* Slash command menu */}
-      <AnimatePresence>
-        {showSlashMenu && (
-          <SlashCommandMenu
-            filter={slashFilter!}
-            selectedIndex={slashIndex}
-            onSelect={handleSlashSelect}
-            anchorRect={wrapperRef.current?.getBoundingClientRect() ?? null}
-            extraCommands={skillCommands}
-          />
-        )}
-      </AnimatePresence>
-
-      {/* Attachment chips — renders inside the pill, above textarea */}
-      {hasAttachments && (
-        <div style={{ paddingTop: 6, marginLeft: -6 }}>
+      {attachments.length > 0 && (
+        <div style={{ paddingTop: 6, paddingBottom: 4 }}>
           <AttachmentChips attachments={attachments} onRemove={removeAttachment} />
         </div>
       )}
@@ -415,8 +347,8 @@ export function InputBar() {
                     : voiceState === 'transcribing'
                       ? 'Transcribing...'
                       : isBusy
-                        ? 'Type to queue a message...'
-                        : 'Ask Claude Code anything...'
+                        ? 'Sending to Warp...'
+                        : 'Type a prompt, press Enter to queue...'
               }
               rows={1}
               className="w-full bg-transparent resize-none"
@@ -432,26 +364,45 @@ export function InputBar() {
             />
 
             <div className="flex items-center justify-end gap-1" style={{ marginTop: 0, paddingBottom: 4 }}>
-              <VoiceButtons
-                voiceState={voiceState}
-                isConnecting={isConnecting}
-                colors={colors}
-                onToggle={handleVoiceToggle}
-                onCancel={cancelRecording}
-                onStop={stopRecording}
-              />
               <AnimatePresence>
-                {canSend && voiceState !== 'recording' && (
-                  <motion.div key="send" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.1 }}>
+                {voiceState !== 'recording' && (
+                  <motion.div key="send" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.1 }} className="flex items-center gap-1">
+                    <div>
+                      <button
+                        onMouseDown={(e) => e.preventDefault()}
+                        className={`h-9 rounded-full px-3 flex items-center gap-2 transition-all text-[11px] font-medium ${showActionHints ? 'justify-between' : 'justify-center'}`}
+                        style={{ background: colors.surfacePrimary, color: canQueue ? colors.textPrimary : colors.textTertiary, border: `1px solid ${colors.toolBorder}`, minWidth: showActionHints ? 104 : 82, opacity: canQueue ? 1 : 0.55 }}
+                        onClick={handleQueue}
+                        disabled={!canQueue}
+                        title="Queue current input"
+                      >
+                        <span>Queue</span>
+                        {showActionHints && <InlineKeycap label="↩" />}
+                      </button>
+                    </div>
                     <button
                       onMouseDown={(e) => e.preventDefault()}
-                      onClick={handleSend}
-                      className="w-9 h-9 rounded-full flex items-center justify-center transition-colors"
-                      style={{ background: colors.sendBg, color: colors.textOnAccent }}
-                      title={isBusy ? 'Queue message' : 'Send (Enter)'}
+                      className="h-9 rounded-full px-3 flex items-center justify-center transition-colors text-[11px] font-medium"
+                      style={{ background: colors.surfacePrimary, color: canSend ? colors.textPrimary : colors.textTertiary, border: `1px solid ${colors.toolBorder}`, opacity: canSend ? 1 : 0.55 }}
+                      onClick={() => void handleSend(false)}
+                      disabled={!canSend}
+                      title="Send queue to Warp"
                     >
-                      <ArrowUp size={16} weight="bold" />
+                      Send
                     </button>
+                    <div>
+                      <button
+                        onMouseDown={(e) => e.preventDefault()}
+                        className={`h-9 rounded-full px-3 flex items-center gap-2 transition-all ${showActionHints ? 'justify-between' : 'justify-center'}`}
+                        style={{ background: colors.sendBg, color: colors.textOnAccent, minWidth: showActionHints ? 116 : 68, opacity: canSend ? 1 : 0.45 }}
+                        onClick={() => void handleSend(true)}
+                        disabled={!canSend}
+                        title="Send queue to Warp and run"
+                      >
+                        <ArrowUp size={16} weight="bold" />
+                        {showActionHints && <InlineKeycap label="⌘↩" accent />}
+                      </button>
+                    </div>
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -473,8 +424,8 @@ export function InputBar() {
                     : voiceState === 'transcribing'
                       ? 'Transcribing...'
                       : isBusy
-                        ? 'Type to queue a message...'
-                        : 'Ask Claude Code anything...'
+                        ? 'Sending to Warp...'
+                        : 'Type a prompt, press Enter to queue...'
               }
               rows={1}
               className="flex-1 bg-transparent resize-none"
@@ -490,26 +441,45 @@ export function InputBar() {
             />
 
             <div className="flex items-center gap-1 shrink-0 ml-2">
-              <VoiceButtons
-                voiceState={voiceState}
-                isConnecting={isConnecting}
-                colors={colors}
-                onToggle={handleVoiceToggle}
-                onCancel={cancelRecording}
-                onStop={stopRecording}
-              />
               <AnimatePresence>
-                {canSend && voiceState !== 'recording' && (
-                  <motion.div key="send" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.1 }}>
+                {voiceState !== 'recording' && (
+                  <motion.div key="send" initial={{ opacity: 0, scale: 0.8 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.8 }} transition={{ duration: 0.1 }} className="flex items-center gap-1">
+                    <div>
+                      <button
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={handleQueue}
+                        className={`h-9 rounded-full px-3 flex items-center gap-2 transition-all text-[11px] font-medium ${showActionHints ? 'justify-between' : 'justify-center'}`}
+                        style={{ background: colors.surfacePrimary, color: canQueue ? colors.textPrimary : colors.textTertiary, border: `1px solid ${colors.toolBorder}`, minWidth: showActionHints ? 104 : 82, opacity: canQueue ? 1 : 0.55 }}
+                        disabled={!canQueue}
+                        title="Queue current input"
+                      >
+                        <span>Queue</span>
+                        {showActionHints && <InlineKeycap label="↩" />}
+                      </button>
+                    </div>
                     <button
                       onMouseDown={(e) => e.preventDefault()}
-                      onClick={handleSend}
-                      className="w-9 h-9 rounded-full flex items-center justify-center transition-colors"
-                      style={{ background: colors.sendBg, color: colors.textOnAccent }}
-                      title={isBusy ? 'Queue message' : 'Send (Enter)'}
+                      onClick={() => void handleSend(false)}
+                      className="h-9 rounded-full px-3 flex items-center justify-center transition-colors text-[11px] font-medium"
+                      style={{ background: colors.surfacePrimary, color: canSend ? colors.textPrimary : colors.textTertiary, border: `1px solid ${colors.toolBorder}`, opacity: canSend ? 1 : 0.55 }}
+                      disabled={!canSend}
+                      title="Send queue to Warp"
                     >
-                      <ArrowUp size={16} weight="bold" />
+                      Send
                     </button>
+                    <div>
+                      <button
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => void handleSend(true)}
+                        className={`h-9 rounded-full px-3 flex items-center gap-2 transition-all ${showActionHints ? 'justify-between' : 'justify-center'}`}
+                        style={{ background: colors.sendBg, color: colors.textOnAccent, minWidth: showActionHints ? 116 : 68, opacity: canSend ? 1 : 0.45 }}
+                        disabled={!canSend}
+                        title="Send queue to Warp and run"
+                      >
+                        <ArrowUp size={16} weight="bold" />
+                        {showActionHints && <InlineKeycap label="⌘↩" accent />}
+                      </button>
+                    </div>
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -525,6 +495,23 @@ export function InputBar() {
         </div>
       )}
     </div>
+  )
+}
+
+function InlineKeycap({ label, accent = false }: { label: string; accent?: boolean }) {
+  const colors = useColors()
+  return (
+    <span
+      className="rounded-full px-2 py-0.5 text-[11px] font-semibold"
+      style={{
+        color: accent ? colors.textOnAccent : colors.textPrimary,
+        background: accent ? 'rgba(0, 0, 0, 0.18)' : colors.surfaceHover,
+        border: `1px solid ${accent ? 'rgba(255,255,255,0.14)' : colors.popoverBorder}`,
+        lineHeight: 1,
+      }}
+    >
+      {label}
+    </span>
   )
 }
 

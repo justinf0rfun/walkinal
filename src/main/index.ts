@@ -1,15 +1,15 @@
 import { app, BrowserWindow, ipcMain, dialog, screen, globalShortcut, Tray, Menu, nativeImage, nativeTheme, shell, systemPreferences, session } from 'electron'
 import { join } from 'path'
-import { existsSync, readdirSync, statSync, createReadStream } from 'fs'
-import { createInterface } from 'readline'
-import { homedir } from 'os'
-import { ControlPlane } from './claude/control-plane'
 import { ensureSkills, type SkillStatus } from './skills/installer'
 import { fetchCatalog, listInstalled, installPlugin, uninstallPlugin } from './marketplace/catalog'
 import { log as _log, LOG_FILE, flushLogs } from './logger'
 import { getCliEnv } from './cli-env'
+import { ConfigStore } from './storage/config-store'
+import { DraftsStore } from './storage/drafts-store'
+import { HistoryStore } from './storage/history-store'
+import { sendToWarpAndRun, sendToWarpDraft } from './warp-bridge'
 import { IPC } from '../shared/types'
-import type { RunOptions, NormalizedEvent, EnrichedError } from '../shared/types'
+import type { DraftsFile, HistoryEntry, WalkinalConfig, WalkinalHistoryIndexListRequest, WalkinalSendRequest } from '../shared/types'
 
 const DEBUG_MODE = process.env.CLUI_DEBUG === '1'
 const SPACES_DEBUG = DEBUG_MODE || process.env.CLUI_SPACES_DEBUG === '1'
@@ -59,10 +59,9 @@ let screenshotCounter = 0
 let toggleSequence = 0
 let lastWindowBounds: Electron.Rectangle | null = null
 
-// Feature flag: enable PTY interactive permissions transport
-const INTERACTIVE_PTY = process.env.CLUI_INTERACTIVE_PERMISSIONS_PTY === '1'
-
-const controlPlane = new ControlPlane(INTERACTIVE_PTY)
+const walkinalConfigStore = new ConfigStore()
+const walkinalDraftsStore = new DraftsStore(() => walkinalConfigStore.ensureStorageDir())
+const walkinalHistoryStore = new HistoryStore(() => walkinalConfigStore.ensureStorageDir())
 
 // Keep native width fixed to avoid renderer animation vs setBounds race.
 // The UI itself still launches in compact mode; extra width is transparent/click-through.
@@ -110,21 +109,6 @@ function scheduleToggleSnapshots(toggleId: number, phase: 'show' | 'hide'): void
     }, delay)
   }
 }
-
-
-// ─── Wire ControlPlane events → renderer ───
-
-controlPlane.on('event', (tabId: string, event: NormalizedEvent) => {
-  broadcast('clui:normalized-event', tabId, event)
-})
-
-controlPlane.on('tab-status-change', (tabId: string, newStatus: string, oldStatus: string) => {
-  broadcast('clui:tab-status-change', tabId, newStatus, oldStatus)
-})
-
-controlPlane.on('error', (tabId: string, error: EnrichedError) => {
-  broadcast('clui:enriched-error', tabId, error)
-})
 
 // ─── Window Creation ───
 
@@ -339,240 +323,13 @@ ipcMain.handle(IPC.START, async () => {
 })
 
 ipcMain.handle(IPC.CREATE_TAB, () => {
-  const tabId = controlPlane.createTab()
+  const tabId = crypto.randomUUID()
   log(`IPC CREATE_TAB → ${tabId}`)
   return { tabId }
 })
 
-ipcMain.on(IPC.INIT_SESSION, (_event, tabId: string) => {
-  log(`IPC INIT_SESSION: ${tabId}`)
-  controlPlane.initSession(tabId)
-})
-
-ipcMain.on(IPC.RESET_TAB_SESSION, (_event, tabId: string) => {
-  log(`IPC RESET_TAB_SESSION: ${tabId}`)
-  controlPlane.resetTabSession(tabId)
-})
-
-ipcMain.handle(IPC.PROMPT, async (_event, { tabId, requestId, options }: { tabId: string; requestId: string; options: RunOptions }) => {
-  if (DEBUG_MODE) {
-    log(`IPC PROMPT: tab=${tabId} req=${requestId} prompt="${options.prompt.substring(0, 100)}"`)
-  } else {
-    log(`IPC PROMPT: tab=${tabId} req=${requestId}`)
-  }
-
-  if (!tabId) {
-    throw new Error('No tabId provided — prompt rejected')
-  }
-  if (!requestId) {
-    throw new Error('No requestId provided — prompt rejected')
-  }
-
-  try {
-    await controlPlane.submitPrompt(tabId, requestId, options)
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err)
-    log(`PROMPT error: ${msg}`)
-    throw err
-  }
-})
-
-ipcMain.handle(IPC.CANCEL, (_event, requestId: string) => {
-  log(`IPC CANCEL: ${requestId}`)
-  return controlPlane.cancel(requestId)
-})
-
-ipcMain.handle(IPC.STOP_TAB, (_event, tabId: string) => {
-  log(`IPC STOP_TAB: ${tabId}`)
-  return controlPlane.cancelTab(tabId)
-})
-
-ipcMain.handle(IPC.RETRY, async (_event, { tabId, requestId, options }: { tabId: string; requestId: string; options: RunOptions }) => {
-  log(`IPC RETRY: tab=${tabId} req=${requestId}`)
-  return controlPlane.retry(tabId, requestId, options)
-})
-
-ipcMain.handle(IPC.STATUS, () => {
-  return controlPlane.getHealth()
-})
-
-ipcMain.handle(IPC.TAB_HEALTH, () => {
-  return controlPlane.getHealth()
-})
-
 ipcMain.handle(IPC.CLOSE_TAB, (_event, tabId: string) => {
   log(`IPC CLOSE_TAB: ${tabId}`)
-  controlPlane.closeTab(tabId)
-})
-
-ipcMain.on(IPC.SET_PERMISSION_MODE, (_event, mode: string) => {
-  if (mode !== 'ask' && mode !== 'auto') {
-    log(`IPC SET_PERMISSION_MODE: invalid mode "${mode}" — ignoring`)
-    return
-  }
-  log(`IPC SET_PERMISSION_MODE: ${mode}`)
-  controlPlane.setPermissionMode(mode)
-})
-
-ipcMain.handle(IPC.RESPOND_PERMISSION, (_event, { tabId, questionId, optionId }: { tabId: string; questionId: string; optionId: string }) => {
-  log(`IPC RESPOND_PERMISSION: tab=${tabId} question=${questionId} option=${optionId}`)
-  return controlPlane.respondToPermission(tabId, questionId, optionId)
-})
-
-ipcMain.handle(IPC.LIST_SESSIONS, async (_e, projectPath?: string) => {
-  log(`IPC LIST_SESSIONS ${projectPath ? `(path=${projectPath})` : ''}`)
-  try {
-    const cwd = projectPath || process.cwd()
-    // Validate projectPath — reject null bytes, newlines, non-absolute paths
-    if (/[\0\r\n]/.test(cwd) || !cwd.startsWith('/')) {
-      log(`LIST_SESSIONS: rejected invalid projectPath: ${cwd}`)
-      return []
-    }
-    // Claude stores project sessions at ~/.claude/projects/<encoded-path>/
-    // Path encoding: replace all '/' with '-' (leading '/' becomes leading '-')
-    const encodedPath = cwd.replace(/\//g, '-')
-    const sessionsDir = join(homedir(), '.claude', 'projects', encodedPath)
-    if (!existsSync(sessionsDir)) {
-      log(`LIST_SESSIONS: directory not found: ${sessionsDir}`)
-      return []
-    }
-    const files = readdirSync(sessionsDir).filter((f: string) => f.endsWith('.jsonl'))
-
-    const sessions: Array<{ sessionId: string; slug: string | null; firstMessage: string | null; lastTimestamp: string; size: number }> = []
-
-    // UUID v4 regex — only consider files named as valid UUIDs
-    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-    for (const file of files) {
-      // The filename (without .jsonl) IS the canonical resume ID for `claude --resume`
-      const fileSessionId = file.replace(/\.jsonl$/, '')
-      if (!UUID_RE.test(fileSessionId)) continue // skip non-UUID files
-
-      const filePath = join(sessionsDir, file)
-      const stat = statSync(filePath)
-      if (stat.size < 100) continue // skip trivially small files
-
-      // Read lines to extract metadata and validate transcript schema
-      const meta: { validated: boolean; slug: string | null; firstMessage: string | null; lastTimestamp: string | null } = {
-        validated: false, slug: null, firstMessage: null, lastTimestamp: null,
-      }
-
-      await new Promise<void>((resolve) => {
-        const rl = createInterface({ input: createReadStream(filePath) })
-        rl.on('line', (line: string) => {
-          try {
-            const obj = JSON.parse(line)
-            // Validate: must have expected Claude transcript fields
-            if (!meta.validated && obj.type && obj.uuid && obj.timestamp) {
-              meta.validated = true
-            }
-            if (obj.slug && !meta.slug) meta.slug = obj.slug
-            if (obj.timestamp) meta.lastTimestamp = obj.timestamp
-            if (obj.type === 'user' && !meta.firstMessage) {
-              const content = obj.message?.content
-              if (typeof content === 'string') {
-                meta.firstMessage = content.substring(0, 100)
-              } else if (Array.isArray(content)) {
-                const textPart = content.find((p: any) => p.type === 'text')
-                meta.firstMessage = textPart?.text?.substring(0, 100) || null
-              }
-            }
-          } catch {}
-          // Read all lines to get the last timestamp
-        })
-        rl.on('close', () => resolve())
-      })
-
-      if (meta.validated) {
-        sessions.push({
-          sessionId: fileSessionId,
-          slug: meta.slug,
-          firstMessage: meta.firstMessage,
-          lastTimestamp: meta.lastTimestamp || stat.mtime.toISOString(),
-          size: stat.size,
-        })
-      }
-    }
-
-    // Sort by last timestamp, most recent first
-    sessions.sort((a, b) => new Date(b.lastTimestamp).getTime() - new Date(a.lastTimestamp).getTime())
-    return sessions.slice(0, 20) // Return top 20
-  } catch (err) {
-    log(`LIST_SESSIONS error: ${err}`)
-    return []
-  }
-})
-
-// Load conversation history from a session's JSONL file
-ipcMain.handle(IPC.LOAD_SESSION, async (_e, arg: { sessionId: string; projectPath?: string } | string) => {
-  const sessionId = typeof arg === 'string' ? arg : arg.sessionId
-  const projectPath = typeof arg === 'string' ? undefined : arg.projectPath
-  log(`IPC LOAD_SESSION ${sessionId}${projectPath ? ` (path=${projectPath})` : ''}`)
-
-  // Validate sessionId — must be strict UUID to prevent path traversal via crafted filenames
-  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-  if (!UUID_RE.test(sessionId)) {
-    log(`LOAD_SESSION: rejected invalid sessionId: ${sessionId}`)
-    return []
-  }
-
-  try {
-    const cwd = projectPath || process.cwd()
-    // Validate projectPath — reject null bytes, newlines, non-absolute paths
-    if (/[\0\r\n]/.test(cwd) || !cwd.startsWith('/')) {
-      log(`LOAD_SESSION: rejected invalid projectPath: ${cwd}`)
-      return []
-    }
-    const encodedPath = cwd.replace(/\//g, '-')
-    const filePath = join(homedir(), '.claude', 'projects', encodedPath, `${sessionId}.jsonl`)
-    if (!existsSync(filePath)) return []
-
-    const messages: Array<{ role: string; content: string; toolName?: string; timestamp: number }> = []
-    await new Promise<void>((resolve) => {
-      const rl = createInterface({ input: createReadStream(filePath) })
-      rl.on('line', (line: string) => {
-        try {
-          const obj = JSON.parse(line)
-          if (obj.type === 'user') {
-            const content = obj.message?.content
-            let text = ''
-            if (typeof content === 'string') {
-              text = content
-            } else if (Array.isArray(content)) {
-              text = content
-                .filter((b: any) => b.type === 'text')
-                .map((b: any) => b.text)
-                .join('\n')
-            }
-            if (text) {
-              messages.push({ role: 'user', content: text, timestamp: new Date(obj.timestamp).getTime() })
-            }
-          } else if (obj.type === 'assistant') {
-            const content = obj.message?.content
-            if (Array.isArray(content)) {
-              for (const block of content) {
-                if (block.type === 'text' && block.text) {
-                  messages.push({ role: 'assistant', content: block.text, timestamp: new Date(obj.timestamp).getTime() })
-                } else if (block.type === 'tool_use' && block.name) {
-                  messages.push({
-                    role: 'tool',
-                    content: '',
-                    toolName: block.name,
-                    timestamp: new Date(obj.timestamp).getTime(),
-                  })
-                }
-              }
-            }
-          }
-        } catch {}
-      })
-      rl.on('close', () => resolve())
-    })
-    return messages
-  } catch (err) {
-    log(`LOAD_SESSION error: ${err}`)
-    return []
-  }
 })
 
 ipcMain.handle(IPC.SELECT_DIRECTORY, async () => {
@@ -945,7 +702,6 @@ ipcMain.handle(IPC.TRANSCRIBE_AUDIO, async (_event, audioBase64: string) => {
 
 ipcMain.handle(IPC.GET_DIAGNOSTICS, () => {
   const { readFileSync, existsSync } = require('fs')
-  const health = controlPlane.getHealth()
 
   let recentLogs = ''
   if (existsSync(LOG_FILE)) {
@@ -957,7 +713,6 @@ ipcMain.handle(IPC.GET_DIAGNOSTICS, () => {
   }
 
   return {
-    health,
     logPath: LOG_FILE,
     recentLogs,
     platform: process.platform,
@@ -965,9 +720,10 @@ ipcMain.handle(IPC.GET_DIAGNOSTICS, () => {
     electronVersion: process.versions.electron,
     nodeVersion: process.versions.node,
     appVersion: app.getVersion(),
-    transport: INTERACTIVE_PTY ? 'pty' : 'stream-json',
+    transport: 'walkinal',
   }
 })
+
 
 ipcMain.handle(IPC.OPEN_IN_TERMINAL, (_event, arg: string | null | { sessionId?: string | null; projectPath?: string }) => {
   const { execFile } = require('child_process')
@@ -1056,6 +812,106 @@ ipcMain.handle(IPC.MARKETPLACE_UNINSTALL, async (_event, { pluginName }: { plugi
 
 ipcMain.handle(IPC.GET_THEME, () => {
   return { isDark: nativeTheme.shouldUseDarkColors }
+})
+
+// ─── Walkinal Draft / History / Bridge ───
+
+ipcMain.handle(IPC.WALKINAL_GET_CONFIG, async () => {
+  return walkinalConfigStore.getConfig()
+})
+
+ipcMain.handle(IPC.WALKINAL_SET_CONFIG, async (_event, partial: Partial<WalkinalConfig>) => {
+  return walkinalConfigStore.updateConfig(partial || {})
+})
+
+ipcMain.handle(IPC.WALKINAL_DRAFTS_LOAD, async () => {
+  return walkinalDraftsStore.load()
+})
+
+ipcMain.handle(IPC.WALKINAL_DRAFTS_SAVE, async (_event, drafts: DraftsFile) => {
+  await walkinalDraftsStore.save(drafts)
+})
+
+ipcMain.handle(IPC.WALKINAL_HISTORY_LIST, async (_event, options?: { limit?: number; offset?: number }) => {
+  return walkinalHistoryStore.list(options)
+})
+
+ipcMain.handle(IPC.WALKINAL_HISTORY_INDEX_LIST, async (_event, options?: WalkinalHistoryIndexListRequest) => {
+  return walkinalHistoryStore.listIndex(options)
+})
+
+ipcMain.handle(IPC.WALKINAL_HISTORY_IMPORT, async (_event, entryId: string) => {
+  if (typeof entryId !== 'string' || entryId.trim().length === 0) return null
+  return walkinalHistoryStore.get(entryId)
+})
+
+ipcMain.handle(IPC.WALKINAL_HISTORY_APPEND, async (_event, { entry }: { entry: HistoryEntry }) => {
+  await walkinalHistoryStore.append(entry)
+})
+
+async function withWalkinalHidden<T>(task: () => Promise<T>): Promise<T> {
+  const wasVisible = !!mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()
+  if (wasVisible) {
+    mainWindow?.hide()
+    // Give macOS a moment to let Warp become the true frontmost target.
+    await new Promise((resolve) => setTimeout(resolve, 80))
+  }
+
+  try {
+    return await task()
+  } finally {
+    if (wasVisible) {
+      // Restore the overlay after the Warp automation sequence settles.
+      setTimeout(() => showWindow('walkinal send restore'), 120)
+    }
+  }
+}
+
+ipcMain.handle(IPC.WALKINAL_QUEUE_SEND_DRAFT, async (_event, request: WalkinalSendRequest) => {
+  log(`IPC WALKINAL_QUEUE_SEND_DRAFT requestId=${request.requestId} itemCount=${request.itemCount} chars=${request.text.length} images=${request.imagePaths?.length ?? 0}`)
+  return withWalkinalHidden(() => sendToWarpDraft({ requestId: request.requestId, text: request.text, imagePaths: request.imagePaths, steps: request.steps }))
+})
+
+ipcMain.handle(IPC.WALKINAL_QUEUE_SEND_AND_RUN, async (_event, request: WalkinalSendRequest) => {
+  log(`IPC WALKINAL_QUEUE_SEND_AND_RUN requestId=${request.requestId} itemCount=${request.itemCount} chars=${request.text.length} images=${request.imagePaths?.length ?? 0}`)
+  return withWalkinalHidden(async () => {
+    const result = await sendToWarpAndRun({ requestId: request.requestId, text: request.text, imagePaths: request.imagePaths, steps: request.steps })
+    if (!result.ok) return result
+
+    const entry: HistoryEntry = {
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      title: request.title?.trim() || 'Untitled Send',
+      content: request.text,
+      itemCount: request.itemCount,
+      target: 'warp',
+      ...(request.workingDirectory ? { workingDirectory: request.workingDirectory } : {}),
+    }
+    await walkinalHistoryStore.append(entry)
+    log(`IPC WALKINAL_QUEUE_SEND_AND_RUN success requestId=${request.requestId}`)
+    return result
+  })
+})
+
+ipcMain.handle(IPC.WALKINAL_QUEUE_SEND, async (_event, request: WalkinalSendRequest) => {
+  log(`IPC WALKINAL_QUEUE_SEND requestId=${request.requestId} itemCount=${request.itemCount} chars=${request.text.length} images=${request.imagePaths?.length ?? 0}`)
+  return withWalkinalHidden(async () => {
+    const result = await sendToWarpAndRun({ requestId: request.requestId, text: request.text, imagePaths: request.imagePaths, steps: request.steps })
+    if (!result.ok) return result
+
+    const entry: HistoryEntry = {
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      title: request.title?.trim() || 'Untitled Send',
+      content: request.text,
+      itemCount: request.itemCount,
+      target: 'warp',
+      ...(request.workingDirectory ? { workingDirectory: request.workingDirectory } : {}),
+    }
+    await walkinalHistoryStore.append(entry)
+    log(`IPC WALKINAL_QUEUE_SEND success requestId=${request.requestId}`)
+    return result
+  })
 })
 
 nativeTheme.on('updated', () => {
@@ -1166,7 +1022,6 @@ app.whenReady().then(async () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll()
-  controlPlane.shutdown()
   flushLogs()
 })
 

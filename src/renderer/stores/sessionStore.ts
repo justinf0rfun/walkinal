@@ -1,43 +1,7 @@
 import { create } from 'zustand'
-import type { TabStatus, NormalizedEvent, EnrichedError, Message, TabState, Attachment, CatalogPlugin, PluginStatus } from '../../shared/types'
+import type { TabStatus, TabState, Attachment, CatalogPlugin, PluginStatus, QueueItem, HistoryEntry, DraftsFile, DraftTabState, WalkinalConfig, SentEntry } from '../../shared/types'
 import { useThemeStore } from '../theme'
 import notificationSrc from '../../../resources/notification.mp3'
-
-// ─── Known models ───
-
-export const AVAILABLE_MODELS = [
-  { id: 'claude-opus-4-6', label: 'Opus 4.6' },
-  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
-  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
-] as const
-
-function normalizeModelId(modelId: string): string {
-  // Claude sometimes appends context window hints like "[1m]" to model IDs.
-  return modelId.replace(/\[[^\]]+\]/g, '').trim()
-}
-
-export function getModelDisplayLabel(modelId: string): string {
-  const normalizedId = normalizeModelId(modelId)
-  const has1MContext = /\[\s*1m\s*\]/i.test(modelId)
-
-  const known = AVAILABLE_MODELS.find((m) => m.id === normalizedId)
-  if (known) {
-    return has1MContext ? `${known.label} (1M)` : known.label
-  }
-
-  // Fallback for future model IDs not yet listed in AVAILABLE_MODELS.
-  const compact = normalizedId
-    .replace(/^claude-/, '')
-    .replace(/-\d{8}$/, '')
-  const familyMatch = compact.match(/^(opus|sonnet|haiku)-(\d+)-(\d+)$/i)
-  if (familyMatch) {
-    const family = familyMatch[1][0].toUpperCase() + familyMatch[1].slice(1).toLowerCase()
-    const label = `${family} ${familyMatch[2]}.${familyMatch[3]}`
-    return has1MContext ? `${label} (1M)` : label
-  }
-
-  return has1MContext ? `${normalizedId} (1M)` : normalizedId
-}
 
 // ─── Store ───
 
@@ -50,17 +14,15 @@ interface StaticInfo {
 }
 
 interface State {
+  draftsBootstrapStarted: boolean
+  draftsReady: boolean
   tabs: TabState[]
   activeTabId: string
   /** Global expand/collapse — user-controlled, not per-tab */
   isExpanded: boolean
   /** Global info fetched on startup (not per-session) */
   staticInfo: StaticInfo | null
-  /** User's preferred model override (null = use default) */
-  preferredModel: string | null
-  /** Global permission mode: 'ask' shows cards, 'auto' auto-approves all tool calls */
-  permissionMode: 'ask' | 'auto'
-
+  walkinalConfig: WalkinalConfig | null
   // Marketplace state
   marketplaceOpen: boolean
   marketplaceCatalog: CatalogPlugin[]
@@ -73,9 +35,12 @@ interface State {
 
   // Actions
   initStaticInfo: () => Promise<void>
-  setPreferredModel: (model: string | null) => void
-  setPermissionMode: (mode: 'ask' | 'auto') => void
+  loadWalkinalConfig: () => Promise<void>
+  setWalkinalStorageDir: (dir: string) => Promise<void>
+  setDraftsBootstrapStarted: (started: boolean) => void
+  setDraftsReady: (ready: boolean) => void
   createTab: () => Promise<string>
+  renameTab: (tabId: string, title: string) => void
   selectTab: (tabId: string) => void
   closeTab: (tabId: string) => void
   clearTab: () => void
@@ -88,23 +53,21 @@ interface State {
   installMarketplacePlugin: (plugin: CatalogPlugin) => Promise<void>
   uninstallMarketplacePlugin: (plugin: CatalogPlugin) => Promise<void>
   buildYourOwn: () => void
-  resumeSession: (sessionId: string, title?: string, projectPath?: string) => Promise<string>
-  addSystemMessage: (content: string) => void
-  sendMessage: (prompt: string, projectPath?: string) => void
-  respondPermission: (tabId: string, questionId: string, optionId: string) => void
+  loadDrafts: (defaultDir: string) => Promise<boolean>
+  persistDrafts: () => Promise<void>
+  restoreHistoryEntry: (entry: HistoryEntry) => Promise<string>
+  enqueueDraft: (prompt: string) => void
+  sendQueuedItems: (run: boolean) => Promise<void>
+  removeQueueItem: (itemId: string) => void
+  editQueueItem: (itemId: string) => string | null
+  moveQueueItem: (itemId: string, direction: 'up' | 'down') => void
   addDirectory: (dir: string) => void
   removeDirectory: (dir: string) => void
   setBaseDirectory: (dir: string) => void
   addAttachments: (attachments: Attachment[]) => void
   removeAttachment: (attachmentId: string) => void
   clearAttachments: () => void
-  handleNormalizedEvent: (tabId: string, event: NormalizedEvent) => void
-  handleStatusChange: (tabId: string, newStatus: string, oldStatus: string) => void
-  handleError: (tabId: string, error: EnrichedError) => void
 }
-
-let msgCounter = 0
-const nextMsgId = () => `msg-${++msgCounter}`
 
 // ─── Notification sound (plays when task completes while window is hidden) ───
 const notificationAudio = new Audio(notificationSrc)
@@ -124,38 +87,205 @@ async function playNotificationIfHidden(): Promise<void> {
 function makeLocalTab(): TabState {
   return {
     id: crypto.randomUUID(),
-    claudeSessionId: null,
     status: 'idle',
-    activeRequestId: null,
     hasUnread: false,
     currentActivity: '',
-    permissionQueue: [],
-    permissionDenied: null,
-    attachments: [],
-    messages: [],
     title: 'New Tab',
-    lastResult: null,
-    sessionModel: null,
-    sessionTools: [],
-    sessionMcpServers: [],
-    sessionSkills: [],
-    sessionVersion: null,
-    queuedPrompts: [],
     workingDirectory: '~',
     hasChosenDirectory: false,
     additionalDirs: [],
+    attachments: [],
+    queueItems: [],
+    sentEntries: [],
+  }
+}
+
+function queueItemsFromAttachments(attachments: Attachment[]): QueueItem[] {
+  return attachments.map((attachment) => ({
+    id: attachment.id,
+    type: attachment.type === 'image' ? 'screenshot' : 'file',
+    content: attachment.type === 'image'
+      ? `Attached image: ${attachment.name}`
+      : `Attached file: ${attachment.name}`,
+    createdAt: Date.now(),
+    metadata: {
+      filePath: attachment.path,
+      fileName: attachment.name,
+      mimeType: attachment.mimeType,
+      size: attachment.size,
+      dataUrl: attachment.dataUrl,
+    },
+  }))
+}
+
+function formatQueueItemForWarp(item: QueueItem): string {
+  if (item.type === 'text') return item.content.trim()
+  if (item.type === 'file') {
+    const filePath = item.metadata?.filePath?.trim()
+    const fileName = item.metadata?.fileName?.trim()
+    if (filePath) return `[Attached file: ${filePath}]`
+    if (fileName) return `[Attached file: ${fileName}]`
+    return item.content.trim()
+  }
+
+  const label = 'Image'
+  const lines = [`[${label}]`]
+  if (item.metadata?.fileName) lines.push(`Name: ${item.metadata.fileName}`)
+  if (item.metadata?.filePath) lines.push(`Path: ${item.metadata.filePath}`)
+  if (item.metadata?.size != null) lines.push(`Size: ${item.metadata.size} bytes`)
+  if (item.content.trim()) lines.push(item.content.trim())
+  return lines.join('\n')
+}
+
+function buildQueuePayload(items: QueueItem[]): string {
+  return items
+    .filter((item) => item.type !== 'screenshot')
+    .map(formatQueueItemForWarp)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function collectImagePaths(items: QueueItem[]): string[] {
+  return items
+    .filter((item) => item.type === 'screenshot')
+    .map((item) => item.metadata?.filePath?.trim() || '')
+    .filter(Boolean)
+}
+
+function buildQueueSendSteps(items: QueueItem[]): Array<{ type: 'text'; text: string } | { type: 'image'; path: string }> {
+  return items.flatMap((item) => {
+    if (item.type === 'screenshot') {
+      const path = item.metadata?.filePath?.trim()
+      return path ? [{ type: 'image' as const, path }] : []
+    }
+
+    const text = formatQueueItemForWarp(item).trim()
+    return text ? [{ type: 'text' as const, text }] : []
+  })
+}
+
+function queueItemsFromHistoryEntry(entry: HistoryEntry): QueueItem[] {
+  const content = entry.content.trim()
+  if (!content) return []
+
+  return [
+    {
+      id: crypto.randomUUID(),
+      type: 'text',
+      content,
+      createdAt: Date.now(),
+    },
+  ]
+}
+
+function deriveAutoTitle(source: string): string {
+  const trimmed = source.trim() || 'New Tab'
+  return trimmed.length > 30 ? `${trimmed.substring(0, 27)}...` : trimmed
+}
+
+function makeContentPreview(content: string, maxLength = 300): string {
+  const trimmed = content.trim()
+  return trimmed.length > maxLength ? `${trimmed.substring(0, maxLength - 3)}...` : trimmed
+}
+
+function makeSentEntry(historyId: string, tabTitle: string, content: string, itemCount: number, mode: 'draft' | 'run'): SentEntry {
+  return {
+    id: crypto.randomUUID(),
+    historyId,
+    timestamp: new Date().toISOString(),
+    title: tabTitle,
+    contentPreview: makeContentPreview(content),
+    itemCount,
+    mode,
+  }
+}
+
+function summarizeQueueForHistory(items: QueueItem[]): string {
+  return items.map((item) => {
+    if (item.type === 'text') return item.content
+    if (item.type === 'file') {
+      const path = item.metadata?.filePath || item.metadata?.fileName || item.content
+      return `[Attached file: ${path}]`
+    }
+    const name = item.metadata?.fileName || 'Image'
+    return `[Attached image: ${name}]`
+  }).join('\n\n')
+}
+
+function capSentEntries(entries: SentEntry[], limit = 20): SentEntry[] {
+  return entries.slice(-limit)
+}
+
+const DRAFT_PERSIST_DELAY_MS = 200
+let draftPersistTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleDraftPersist(store: () => State): void {
+  if (!store().draftsReady) return
+  if (draftPersistTimer) clearTimeout(draftPersistTimer)
+  draftPersistTimer = setTimeout(() => {
+    draftPersistTimer = null
+    store().persistDrafts().catch(() => {})
+  }, DRAFT_PERSIST_DELAY_MS)
+}
+
+function flushDraftPersist(store: () => State): void {
+  if (!store().draftsReady) return
+  if (draftPersistTimer) {
+    clearTimeout(draftPersistTimer)
+    draftPersistTimer = null
+  }
+  store().persistDrafts().catch(() => {})
+}
+
+function debugLog(message: string, data?: unknown): void {
+  if (typeof console === 'undefined') return
+  if (data === undefined) {
+    console.log(message)
+    return
+  }
+  console.log(message, data)
+}
+
+function toDraftTab(tab: TabState): DraftTabState {
+  return {
+    id: tab.id,
+    title: tab.title,
+    attachments: tab.attachments,
+    queue: tab.queueItems,
+    sentEntries: tab.sentEntries,
+    draftInput: '',
+    hasUnread: tab.hasUnread,
+    workingDirectory: tab.workingDirectory,
+    additionalDirs: tab.additionalDirs,
+  }
+}
+
+function fromDraftTab(tab: DraftTabState, defaultDir: string): TabState {
+  return {
+    ...makeLocalTab(),
+    id: tab.id,
+    title: tab.title || 'New Tab',
+    hasUnread: !!tab.hasUnread,
+    workingDirectory: tab.workingDirectory || defaultDir,
+    hasChosenDirectory: !!tab.workingDirectory && tab.workingDirectory !== defaultDir ? true : tab.workingDirectory !== '~',
+    additionalDirs: Array.isArray(tab.additionalDirs) ? tab.additionalDirs : [],
+    attachments: Array.isArray(tab.attachments) ? tab.attachments : [],
+    queueItems: Array.isArray(tab.queue) ? tab.queue : [],
+    sentEntries: Array.isArray(tab.sentEntries) ? tab.sentEntries : [],
   }
 }
 
 const initialTab = makeLocalTab()
 
 export const useSessionStore = create<State>((set, get) => ({
-  tabs: [initialTab],
-  activeTabId: initialTab.id,
+  draftsBootstrapStarted: false,
+  draftsReady: false,
+  tabs: [],
+  activeTabId: '',
   isExpanded: false,
   staticInfo: null,
-  preferredModel: null,
-  permissionMode: 'ask',
+  walkinalConfig: null,
 
   // Marketplace
   marketplaceOpen: false,
@@ -182,13 +312,25 @@ export const useSessionStore = create<State>((set, get) => ({
     } catch {}
   },
 
-  setPreferredModel: (model) => {
-    set({ preferredModel: model })
+  loadWalkinalConfig: async () => {
+    try {
+      const config = await window.clui.getWalkinalConfig()
+      set({ walkinalConfig: config })
+    } catch {}
   },
 
-  setPermissionMode: (mode) => {
-    set({ permissionMode: mode })
-    window.clui.setPermissionMode(mode)
+  setWalkinalStorageDir: async (dir) => {
+    const config = await window.clui.setWalkinalConfig({ storageDir: dir })
+    set({ walkinalConfig: config })
+    await get().persistDrafts()
+  },
+
+  setDraftsBootstrapStarted: (started) => {
+    set({ draftsBootstrapStarted: started })
+  },
+
+  setDraftsReady: (ready) => {
+    set({ draftsReady: ready })
   },
 
   createTab: async () => {
@@ -204,6 +346,7 @@ export const useSessionStore = create<State>((set, get) => ({
         tabs: [...s.tabs, tab],
         activeTabId: tab.id,
       }))
+      scheduleDraftPersist(get)
       return tabId
     } catch {
       const tab = makeLocalTab()
@@ -212,8 +355,23 @@ export const useSessionStore = create<State>((set, get) => ({
         tabs: [...s.tabs, tab],
         activeTabId: tab.id,
       }))
+      scheduleDraftPersist(get)
       return tab.id
     }
+  },
+
+  renameTab: (tabId, title) => {
+    const nextTitle = title.trim()
+    if (!nextTitle) return
+
+    set((s) => ({
+      tabs: s.tabs.map((tab) =>
+        tab.id === tabId
+          ? { ...tab, title: nextTitle }
+          : tab
+      ),
+    }))
+    scheduleDraftPersist(get)
   },
 
   selectTab: (tabId) => {
@@ -238,6 +396,7 @@ export const useSessionStore = create<State>((set, get) => ({
           t.id === tabId ? { ...t, hasUnread: false } : t
         ),
       }))
+      scheduleDraftPersist(get)
     }
   },
 
@@ -343,8 +502,35 @@ export const useSessionStore = create<State>((set, get) => ({
     set({ marketplaceOpen: false, isExpanded: true })
     // Small delay to let the UI transition
     setTimeout(() => {
-      get().sendMessage('Help me create a new Claude Code skill')
+      get().enqueueDraft('Help me create a new Claude Code skill')
     }, 100)
+  },
+
+  loadDrafts: async (defaultDir) => {
+    try {
+      const drafts = await window.clui.loadWalkinalDrafts()
+      if (!drafts.tabs || drafts.tabs.length === 0) return false
+
+      const tabs = drafts.tabs.map((tab) => fromDraftTab(tab, defaultDir))
+      const activeExists = tabs.some((tab) => tab.id === drafts.activeTabId)
+
+      set({
+        tabs,
+        activeTabId: activeExists ? drafts.activeTabId : tabs[0].id,
+      })
+      return true
+    } catch {
+      return false
+    }
+  },
+
+  persistDrafts: async () => {
+    const { tabs, activeTabId } = get()
+    const drafts: DraftsFile = {
+      activeTabId,
+      tabs: tabs.map(toDraftTab),
+    }
+    await window.clui.saveWalkinalDrafts(drafts)
   },
 
   closeTab: (tabId) => {
@@ -357,6 +543,7 @@ export const useSessionStore = create<State>((set, get) => ({
       if (remaining.length === 0) {
         const newTab = makeLocalTab()
         set({ tabs: [newTab], activeTabId: newTab.id })
+        scheduleDraftPersist(get)
         return
       }
       const closedIndex = s.tabs.findIndex((t) => t.id === tabId)
@@ -365,6 +552,7 @@ export const useSessionStore = create<State>((set, get) => ({
     } else {
       set({ tabs: remaining })
     }
+    scheduleDraftPersist(get)
   },
 
   clearTab: () => {
@@ -372,96 +560,255 @@ export const useSessionStore = create<State>((set, get) => ({
     set((s) => ({
       tabs: s.tabs.map((t) =>
         t.id === activeTabId
-          ? { ...t, messages: [], lastResult: null, currentActivity: '', permissionQueue: [], permissionDenied: null, queuedPrompts: [] }
+          ? { ...t, currentActivity: '', attachments: [], queueItems: [], sentEntries: [] }
           : t
       ),
     }))
+    scheduleDraftPersist(get)
   },
 
-  resumeSession: async (sessionId, title, projectPath) => {
-    const defaultDir = projectPath || get().staticInfo?.homePath || '~'
+  restoreHistoryEntry: async (entry) => {
+    const defaultDir = entry.workingDirectory || get().staticInfo?.homePath || '~'
+    const queueItems = queueItemsFromHistoryEntry(entry)
+
     try {
       const { tabId } = await window.clui.createTab()
-
-      // Load previous conversation messages from the JSONL file
-      const history = await window.clui.loadSession(sessionId, defaultDir).catch(() => [])
-      const messages: Message[] = history.map((m) => ({
-        id: nextMsgId(),
-        role: m.role as Message['role'],
-        content: m.content,
-        toolName: m.toolName,
-        toolStatus: m.toolName ? 'completed' as const : undefined,
-        timestamp: m.timestamp,
-      }))
-
       const tab: TabState = {
         ...makeLocalTab(),
         id: tabId,
-        claudeSessionId: sessionId,
-        title: title || 'Resumed Session',
+        title: entry.title || 'Restored History',
         workingDirectory: defaultDir,
-        hasChosenDirectory: !!projectPath,
-        messages,
+        hasChosenDirectory: defaultDir !== '~',
+        queueItems,
       }
       set((s) => ({
         tabs: [...s.tabs, tab],
         activeTabId: tab.id,
         isExpanded: true,
       }))
-      // Don't call initSession — the first real prompt will use --resume with the sessionId
+      scheduleDraftPersist(get)
       return tabId
     } catch {
       const tab = makeLocalTab()
-      tab.claudeSessionId = sessionId
-      tab.title = title || 'Resumed Session'
+      tab.title = entry.title || 'Restored History'
       tab.workingDirectory = defaultDir
-      tab.hasChosenDirectory = !!projectPath
+      tab.hasChosenDirectory = defaultDir !== '~'
+      tab.queueItems = queueItems
       set((s) => ({
         tabs: [...s.tabs, tab],
         activeTabId: tab.id,
         isExpanded: true,
       }))
+      scheduleDraftPersist(get)
       return tab.id
     }
   },
 
-  addSystemMessage: (content) => {
+  enqueueDraft: (prompt) => {
     const { activeTabId } = get()
+    const trimmed = prompt.trim()
     set((s) => ({
       tabs: s.tabs.map((t) =>
         t.id === activeTabId
           ? {
               ...t,
-              messages: [
-                ...t.messages,
-                { id: nextMsgId(), role: 'system' as const, content, timestamp: Date.now() },
+              queueItems: [
+                ...t.queueItems,
+                ...(trimmed
+                  ? [{
+                      id: crypto.randomUUID(),
+                      type: 'text' as const,
+                      content: trimmed,
+                      createdAt: Date.now(),
+                    }]
+                  : []),
+                ...queueItemsFromAttachments(t.attachments),
               ],
+              attachments: [],
             }
           : t
       ),
     }))
+    scheduleDraftPersist(get)
   },
 
-  // ─── Permission response ───
+  sendQueuedItems: async (run) => {
+    const { activeTabId, tabs, staticInfo } = get()
+    const tab = tabs.find((t) => t.id === activeTabId)
+    if (!tab) return
+    if (tab.status === 'running') return
+    if (tab.queueItems.length === 0) return
 
-  respondPermission: (tabId, questionId, optionId) => {
-    // Send to backend
-    window.clui.respondPermission(tabId, questionId, optionId).catch(() => {})
+    const resolvedPath = tab.hasChosenDirectory
+      ? tab.workingDirectory
+      : (staticInfo?.homePath || tab.workingDirectory || '~')
+    const requestId = crypto.randomUUID()
+    const steps = buildQueueSendSteps(tab.queueItems)
+    const payload = buildQueuePayload(tab.queueItems)
+    const imagePaths = collectImagePaths(tab.queueItems)
+    debugLog('[walkinal] sendQueuedItems:steps', steps)
+    if (steps.length === 0 && !payload && imagePaths.length === 0) return
+    const hasCustomTitle = tab.title.trim().length > 0 && tab.title !== 'New Tab'
+    const title = hasCustomTitle
+      ? tab.title
+      : deriveAutoTitle(tab.queueItems[0]?.content || tab.title || 'New Tab')
 
-    // Remove answered item from queue; show next tool's activity or clear
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === activeTabId
+          ? {
+              ...t,
+              status: 'running' as TabStatus,
+              currentActivity: run ? 'Sending to Warp and running...' : 'Sending to Warp...',
+              title,
+            }
+          : t
+      ),
+    }))
+
+    try {
+      const result = run
+        ? await window.clui.sendWalkinalQueueAndRun({
+            requestId,
+            text: payload,
+            imagePaths,
+            steps,
+            title,
+            itemCount: tab.queueItems.length,
+            workingDirectory: resolvedPath,
+          })
+        : await window.clui.sendWalkinalDraft({
+            requestId,
+            text: payload,
+            imagePaths,
+            steps,
+            title,
+            itemCount: tab.queueItems.length,
+            workingDirectory: resolvedPath,
+          })
+
+      if (!result.ok) {
+        throw new Error(result.error || `Failed to ${run ? 'send and run' : 'send'} queue`)
+      }
+
+      const sentItems = summarizeQueueForHistory(tab.queueItems)
+      const historyId = crypto.randomUUID()
+      const historyEntry: HistoryEntry = {
+        id: historyId,
+        timestamp: new Date().toISOString(),
+        title,
+        content: sentItems,
+        itemCount: tab.queueItems.length,
+        mode: run ? 'run' : 'draft',
+        target: 'warp',
+        ...(resolvedPath ? { workingDirectory: resolvedPath } : {}),
+      }
+      const sentEntry = makeSentEntry(historyId, title, sentItems, tab.queueItems.length, run ? 'run' : 'draft')
+
+      await window.clui.appendWalkinalHistory({ entry: historyEntry })
+      set((s) => ({
+        tabs: s.tabs.map((t) =>
+          t.id === activeTabId
+            ? {
+                ...t,
+                status: 'completed' as TabStatus,
+                currentActivity: '',
+                attachments: [],
+                queueItems: [],
+                sentEntries: sentItems
+                  ? capSentEntries([...t.sentEntries, sentEntry])
+                  : t.sentEntries,
+              }
+            : t
+        ),
+      }))
+
+      playNotificationIfHidden()
+      scheduleDraftPersist(get)
+    } catch (err: unknown) {
+      set((s) => ({
+        tabs: s.tabs.map((t) =>
+          t.id === activeTabId
+            ? {
+                ...t,
+                status: 'failed' as TabStatus,
+                currentActivity: '',
+                attachments: [],
+                sentEntries: capSentEntries([
+                ...t.sentEntries,
+                  makeSentEntry(
+                    crypto.randomUUID(),
+                    t.title,
+                    tab.queueItems.some((item) => item.type === 'screenshot')
+                      ? `Image send failed: ${err instanceof Error ? err.message : String(err)}`
+                      : `Error: ${err instanceof Error ? err.message : String(err)}`,
+                    0,
+                    'draft',
+                  ),
+                ]),
+              }
+            : t
+        ),
+      }))
+      scheduleDraftPersist(get)
+    }
+  },
+
+  removeQueueItem: (itemId) => {
+    const { activeTabId } = get()
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === activeTabId
+          ? { ...t, queueItems: t.queueItems.filter((item) => item.id !== itemId) }
+          : t
+      ),
+    }))
+    scheduleDraftPersist(get)
+  },
+
+  editQueueItem: (itemId) => {
+    const { activeTabId, tabs } = get()
+    const tab = tabs.find((t) => t.id === activeTabId)
+    const item = tab?.queueItems.find((queueItem) => queueItem.id === itemId)
+    if (!item) return null
+
+    set((s) => ({
+      tabs: s.tabs.map((t) =>
+        t.id === activeTabId
+          ? { ...t, queueItems: t.queueItems.filter((queueItem) => queueItem.id !== itemId) }
+          : t
+      ),
+    }))
+    scheduleDraftPersist(get)
+
+    return item.content
+  },
+
+  moveQueueItem: (itemId, direction) => {
+    const { activeTabId } = get()
+
     set((s) => ({
       tabs: s.tabs.map((t) => {
-        if (t.id !== tabId) return t
-        const remaining = t.permissionQueue.filter((p) => p.questionId !== questionId)
+        if (t.id !== activeTabId) return t
+
+        const sourceIndex = t.queueItems.findIndex((item) => item.id === itemId)
+        if (sourceIndex === -1) return t
+
+        const targetIndex = direction === 'up' ? sourceIndex - 1 : sourceIndex + 1
+        if (targetIndex < 0 || targetIndex >= t.queueItems.length) return t
+
+        const nextItems = [...t.queueItems]
+        const [moved] = nextItems.splice(sourceIndex, 1)
+        nextItems.splice(targetIndex, 0, moved)
+
         return {
           ...t,
-          permissionQueue: remaining,
-          currentActivity: remaining.length > 0
-            ? `Waiting for permission: ${remaining[0].toolTitle}`
-            : 'Working...',
+          queueItems: nextItems,
         }
       }),
     }))
+
+    scheduleDraftPersist(get)
   },
 
   // ─── Directory management ───
@@ -480,6 +827,7 @@ export const useSessionStore = create<State>((set, get) => ({
           : t
       ),
     }))
+    scheduleDraftPersist(get)
   },
 
   removeDirectory: (dir) => {
@@ -491,6 +839,7 @@ export const useSessionStore = create<State>((set, get) => ({
           : t
       ),
     }))
+    scheduleDraftPersist(get)
   },
 
   setBaseDirectory: (dir) => {
@@ -503,12 +852,12 @@ export const useSessionStore = create<State>((set, get) => ({
               ...t,
               workingDirectory: dir,
               hasChosenDirectory: true,
-              claudeSessionId: null,
               additionalDirs: [],
             }
           : t
       ),
     }))
+    scheduleDraftPersist(get)
   },
 
   // ─── Attachment management ───
@@ -518,10 +867,14 @@ export const useSessionStore = create<State>((set, get) => ({
     set((s) => ({
       tabs: s.tabs.map((t) =>
         t.id === activeTabId
-          ? { ...t, attachments: [...t.attachments, ...attachments] }
+          ? {
+              ...t,
+              attachments: [...t.attachments, ...attachments],
+            }
           : t
       ),
     }))
+    scheduleDraftPersist(get)
   },
 
   removeAttachment: (attachmentId) => {
@@ -529,406 +882,23 @@ export const useSessionStore = create<State>((set, get) => ({
     set((s) => ({
       tabs: s.tabs.map((t) =>
         t.id === activeTabId
-          ? { ...t, attachments: t.attachments.filter((a) => a.id !== attachmentId) }
+          ? { ...t, attachments: t.attachments.filter((attachment) => attachment.id !== attachmentId) }
           : t
       ),
     }))
+    scheduleDraftPersist(get)
   },
 
   clearAttachments: () => {
     const { activeTabId } = get()
     set((s) => ({
       tabs: s.tabs.map((t) =>
-        t.id === activeTabId ? { ...t, attachments: [] } : t
-      ),
-    }))
-  },
-
-  // ─── Send ───
-
-  sendMessage: (prompt, projectPath) => {
-    const { activeTabId, tabs, staticInfo } = get()
-    const tab = tabs.find((t) => t.id === activeTabId)
-    // Use explicitly chosen directory, otherwise fall back to user home
-    const resolvedPath = projectPath || (tab?.hasChosenDirectory ? tab.workingDirectory : (staticInfo?.homePath || tab?.workingDirectory || '~'))
-    if (!tab) return
-
-    // Guard: don't send while connecting (warmup in progress)
-    if (tab.status === 'connecting') return
-
-    const isBusy = tab.status === 'running'
-    const requestId = crypto.randomUUID()
-
-    // Build full prompt with attachment context
-    let fullPrompt = prompt
-    if (tab.attachments.length > 0) {
-      const attachmentCtx = tab.attachments
-        .map((a) => `[Attached ${a.type}: ${a.path}]`)
-        .join('\n')
-      fullPrompt = `${attachmentCtx}\n\n${prompt}`
-    }
-
-    const title = tab.messages.length === 0
-      ? (prompt.length > 30 ? prompt.substring(0, 27) + '...' : prompt)
-      : tab.title
-
-    // Optimistic update: clear attachments
-    // If busy, add to queuedPrompts (shown at bottom); otherwise add to messages and set connecting
-    set((s) => ({
-      tabs: s.tabs.map((t) => {
-        if (t.id !== activeTabId) return t
-        const withEffectiveBase = t.hasChosenDirectory
-          ? t
-          : {
-              ...t,
-              // Once the user sends the first message, lock in the effective
-              // base directory (home by default) so the footer no longer shows "—".
-              hasChosenDirectory: true,
-              workingDirectory: resolvedPath,
-            }
-        if (isBusy) {
-          return {
-            ...withEffectiveBase,
-            title,
-            attachments: [],
-            queuedPrompts: [...withEffectiveBase.queuedPrompts, prompt],
-          }
-        }
-        return {
-          ...withEffectiveBase,
-          status: 'connecting' as TabStatus,
-          activeRequestId: requestId,
-          currentActivity: 'Starting...',
-          title,
-          attachments: [],
-          messages: [
-            ...withEffectiveBase.messages,
-            { id: nextMsgId(), role: 'user' as const, content: prompt, timestamp: Date.now() },
-          ],
-        }
-      }),
-    }))
-
-    // Send to backend — ControlPlane will queue if a run is active
-    const { preferredModel } = get()
-    window.clui.prompt(activeTabId, requestId, {
-      prompt: fullPrompt,
-      projectPath: resolvedPath,
-      sessionId: tab.claudeSessionId || undefined,
-      model: preferredModel || undefined,
-      addDirs: tab.additionalDirs.length > 0 ? tab.additionalDirs : undefined,
-    }).catch((err: Error) => {
-      get().handleError(activeTabId, {
-        message: err.message,
-        stderrTail: [],
-        exitCode: null,
-        elapsedMs: 0,
-        toolCallCount: 0,
-      })
-    })
-  },
-
-  // ─── Event handlers ───
-
-  handleNormalizedEvent: (tabId, event) => {
-    set((s) => {
-      const { activeTabId } = s
-      const tabs = s.tabs.map((tab) => {
-        if (tab.id !== tabId) return tab
-        const updated = { ...tab }
-
-        switch (event.type) {
-          case 'session_init':
-            updated.claudeSessionId = event.sessionId
-            updated.sessionModel = event.model
-            updated.sessionTools = event.tools
-            updated.sessionMcpServers = event.mcpServers
-            updated.sessionSkills = event.skills
-            updated.sessionVersion = event.version
-            // Don't change status/activity for warmup inits — they're invisible
-            if (!event.isWarmup) {
-              updated.status = 'running'
-              updated.currentActivity = 'Thinking...'
-              // Move the first queued prompt into the timeline (it's now being processed)
-              if (updated.queuedPrompts.length > 0) {
-                const [nextPrompt, ...rest] = updated.queuedPrompts
-                updated.queuedPrompts = rest
-                updated.messages = [
-                  ...updated.messages,
-                  { id: nextMsgId(), role: 'user' as const, content: nextPrompt, timestamp: Date.now() },
-                ]
-              }
-            }
-            break
-
-          case 'text_chunk': {
-            updated.currentActivity = 'Writing...'
-            const lastMsg = updated.messages[updated.messages.length - 1]
-            if (lastMsg?.role === 'assistant' && !lastMsg.toolName) {
-              updated.messages = [
-                ...updated.messages.slice(0, -1),
-                { ...lastMsg, content: lastMsg.content + event.text },
-              ]
-            } else {
-              updated.messages = [
-                ...updated.messages,
-                { id: nextMsgId(), role: 'assistant', content: event.text, timestamp: Date.now() },
-              ]
-            }
-            break
-          }
-
-          case 'tool_call':
-            updated.currentActivity = `Running ${event.toolName}...`
-            updated.messages = [
-              ...updated.messages,
-              {
-                id: nextMsgId(),
-                role: 'tool',
-                content: '',
-                toolName: event.toolName,
-                toolInput: '',
-                toolStatus: 'running',
-                timestamp: Date.now(),
-              },
-            ]
-            break
-
-          case 'tool_call_update': {
-            const msgs = [...updated.messages]
-            const lastTool = [...msgs].reverse().find((m) => m.role === 'tool' && m.toolStatus === 'running')
-            if (lastTool) {
-              lastTool.toolInput = (lastTool.toolInput || '') + event.partialInput
-            }
-            updated.messages = msgs
-            break
-          }
-
-          case 'tool_call_complete': {
-            const msgs2 = [...updated.messages]
-            const runningTool = [...msgs2].reverse().find((m) => m.role === 'tool' && m.toolStatus === 'running')
-            if (runningTool) {
-              runningTool.toolStatus = 'completed'
-            }
-            updated.messages = msgs2
-            break
-          }
-
-          case 'task_update': {
-            // ── Text fallback ──
-            // text_chunk events (from stream_event deltas) are the primary render path.
-            // If they didn't arrive for this run (timing, partial stream, etc.), the
-            // assembled assistant event still has the full text — extract it here.
-            // "This run" = everything after the last user message.
-            if (event.message?.content) {
-              const lastUserIdx = (() => {
-                for (let i = updated.messages.length - 1; i >= 0; i--) {
-                  if (updated.messages[i].role === 'user') return i
-                }
-                return -1
-              })()
-              const hasStreamedText = updated.messages
-                .slice(lastUserIdx + 1)
-                .some((m) => m.role === 'assistant' && !m.toolName)
-
-              if (!hasStreamedText) {
-                const textContent = event.message.content
-                  .filter((b) => b.type === 'text' && b.text)
-                  .map((b) => b.text!)
-                  .join('')
-                if (textContent) {
-                  updated.messages = [
-                    ...updated.messages,
-                    { id: nextMsgId(), role: 'assistant' as const, content: textContent, timestamp: Date.now() },
-                  ]
-                }
-              }
-
-              // ── Tool card deduplication (unchanged) ──
-              for (const block of event.message.content) {
-                if (block.type === 'tool_use' && block.name) {
-                  const exists = updated.messages.find(
-                    (m) => m.role === 'tool' && m.toolName === block.name && !m.content
-                  )
-                  if (!exists) {
-                    updated.messages = [
-                      ...updated.messages,
-                      {
-                        id: nextMsgId(),
-                        role: 'tool',
-                        content: '',
-                        toolName: block.name,
-                        toolInput: JSON.stringify(block.input, null, 2),
-                        toolStatus: 'completed',
-                        timestamp: Date.now(),
-                      },
-                    ]
-                  }
-                }
-              }
-            }
-            break
-          }
-
-          case 'task_complete':
-            updated.status = 'completed'
-            updated.activeRequestId = null
-            updated.currentActivity = ''
-            updated.permissionQueue = []
-            updated.lastResult = {
-              totalCostUsd: event.costUsd,
-              durationMs: event.durationMs,
-              numTurns: event.numTurns,
-              usage: event.usage,
-              sessionId: event.sessionId,
-            }
-            // ── Final text fallback ──
-            // If neither text_chunks nor task_update text produced an assistant message,
-            // use event.result (the CLI's assembled final output) as last resort.
-            if (event.result) {
-              const lastUserIdx2 = (() => {
-                for (let i = updated.messages.length - 1; i >= 0; i--) {
-                  if (updated.messages[i].role === 'user') return i
-                }
-                return -1
-              })()
-              const hasAnyText = updated.messages
-                .slice(lastUserIdx2 + 1)
-                .some((m) => m.role === 'assistant' && !m.toolName)
-              if (!hasAnyText) {
-                updated.messages = [
-                  ...updated.messages,
-                  { id: nextMsgId(), role: 'assistant' as const, content: event.result, timestamp: Date.now() },
-                ]
-              }
-            }
-            // Mark as unread unless the user is actively viewing this tab
-            // (active tab with card expanded). A collapsed active tab still
-            // counts as "unread" — the user hasn't seen the response yet.
-            if (tabId !== activeTabId || !s.isExpanded) {
-              updated.hasUnread = true
-            }
-            // Show fallback card when tools were denied by permission settings
-            if (event.permissionDenials && event.permissionDenials.length > 0) {
-              updated.permissionDenied = { tools: event.permissionDenials }
-            } else {
-              updated.permissionDenied = null
-            }
-            // Play notification sound if window is hidden
-            playNotificationIfHidden()
-            break
-
-          case 'error':
-            updated.status = 'failed'
-            updated.activeRequestId = null
-            updated.currentActivity = ''
-            updated.permissionQueue = []
-            updated.permissionDenied = null
-            updated.messages = [
-              ...updated.messages,
-              { id: nextMsgId(), role: 'system', content: `Error: ${event.message}`, timestamp: Date.now() },
-            ]
-            break
-
-          case 'session_dead':
-            updated.status = 'dead'
-            updated.activeRequestId = null
-            updated.currentActivity = ''
-            updated.permissionQueue = []
-            updated.permissionDenied = null
-            updated.messages = [
-              ...updated.messages,
-              {
-                id: nextMsgId(),
-                role: 'system',
-                content: `Session ended unexpectedly (exit ${event.exitCode})`,
-                timestamp: Date.now(),
-              },
-            ]
-            break
-
-          case 'permission_request': {
-            const newReq: import('../../shared/types').PermissionRequest = {
-              questionId: event.questionId,
-              toolTitle: event.toolName,
-              toolDescription: event.toolDescription,
-              toolInput: event.toolInput,
-              options: event.options.map((o) => ({
-                optionId: o.id,
-                kind: o.kind,
-                label: o.label,
-              })),
-            }
-            updated.permissionQueue = [...updated.permissionQueue, newReq]
-            updated.currentActivity = `Waiting for permission: ${event.toolName}`
-            break
-          }
-
-          case 'rate_limit':
-            if (event.status !== 'allowed') {
-              updated.messages = [
-                ...updated.messages,
-                {
-                  id: nextMsgId(),
-                  role: 'system',
-                  content: `Rate limited (${event.rateLimitType}). Resets at ${new Date(event.resetsAt).toLocaleTimeString()}.`,
-                  timestamp: Date.now(),
-                },
-              ]
-            }
-            break
-        }
-
-        return updated
-      })
-
-      return { tabs }
-    })
-  },
-
-  handleStatusChange: (tabId, newStatus) => {
-    set((s) => ({
-      tabs: s.tabs.map((t) =>
-        t.id === tabId
-          ? {
-              ...t,
-              status: newStatus as TabStatus,
-              // Clear activity when transitioning to idle (e.g., after warmup init)
-              ...(newStatus === 'idle' ? { currentActivity: '', permissionQueue: [] as import('../../shared/types').PermissionRequest[], permissionDenied: null } : {}),
-            }
+        t.id === activeTabId
+          ? { ...t, attachments: [] }
           : t
       ),
     }))
+    scheduleDraftPersist(get)
   },
 
-  handleError: (tabId, error) => {
-    set((s) => ({
-      tabs: s.tabs.map((t) => {
-        if (t.id !== tabId) return t
-
-        // Deduplicate: skip if the last message is already an error for this failure
-        const lastMsg = t.messages[t.messages.length - 1]
-        const alreadyHasError = lastMsg?.role === 'system' && lastMsg.content.startsWith('Error:')
-
-        return {
-          ...t,
-          status: 'failed' as TabStatus,
-          activeRequestId: null,
-          currentActivity: '',
-          permissionQueue: [],
-          messages: alreadyHasError
-            ? t.messages
-            : [
-                ...t.messages,
-                {
-                  id: nextMsgId(),
-                  role: 'system' as const,
-                  content: `Error: ${error.message}${error.stderrTail.length > 0 ? '\n\n' + error.stderrTail.slice(-5).join('\n') : ''}`,
-                  timestamp: Date.now(),
-                },
-              ],
-        }
-      }),
-    }))
-  },
 }))

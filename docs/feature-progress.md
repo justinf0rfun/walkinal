@@ -1,0 +1,50 @@
+# Walkinal 功能进度
+
+## 基础链路
+
+- [x] Warp 发送链路打通
+- [x] Send / Send and Run 区分
+- [x] Queue 入队与发送主流程
+- [x] 多 tab 基础能力
+- [x] tab 重命名
+
+## 草稿与恢复
+
+- [x] drafts.json 持久化
+- [x] 多 tab 重启恢复
+- [x] 删除 tab 后不再恢复
+- [x] 存储目录切换
+
+## 历史
+
+- [x] history.jsonl 全局历史写入
+- [x] HistoryPicker 切到 Walkinal 历史
+- [x] History 最近一页加载
+- [x] History Load more 分页
+- [ ] History 搜索
+- [ ] History 过滤
+
+## 队列体验
+
+- [x] Queue 编辑回填
+- [x] Queue 删除
+- [x] Queue 上下排序
+- [ ] Queue 批量操作
+
+## 数据模型
+
+- [x] sentEntries 接入
+- [x] tab.messages 退场
+- [x] sentEntries 轻量化（摘要 + historyId）
+
+## 存储与性能
+
+- [x] history append-only
+- [x] drafts 持久化调度器收口
+- [ ] history-index.json
+- [ ] 基于索引的历史查询
+
+## 文档
+
+- [ ] README 全量改为 Walkinal
+- [ ] docs 全量对齐 Walkinal 现状

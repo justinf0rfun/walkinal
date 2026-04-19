@@ -1,240 +1,248 @@
-# Clui CC — Command Line User Interface for Claude Code
+# Walkinal
 
-A lightweight, transparent desktop overlay for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) on macOS. Clui CC wraps the Claude Code CLI in a floating pill interface with multi-tab sessions, a permission approval UI, voice input, and a skills marketplace.
+Walkinal is a macOS floating input companion for terminal-native AI workflows.
 
-## Demo
+This project is a fork of [lcoutodemos/clui-cc](https://github.com/lcoutodemos/clui-cc). It keeps parts of the original Electron overlay foundation, while changing the product model from a Claude conversation shell into a queue-first terminal AI input companion.
 
-[![Watch the demo](https://img.youtube.com/vi/NqRBIpaA4Fk/maxresdefault.jpg)](https://www.youtube.com/watch?v=NqRBIpaA4Fk)
+Instead of acting as a chat client, Walkinal lets you stage text, files, and images in a queue, then send them into a terminal session running tools like:
 
-<p align="center"><a href="https://www.youtube.com/watch?v=NqRBIpaA4Fk">▶ Watch the full demo on YouTube</a></p>
+- `Claude Code`
+- `Codex CLI`
+
+Its core workflow is:
+
+```text
+draft -> queue -> send -> send and run
+```
+
+## What It Is
+
+Walkinal is:
+
+- a macOS-only Electron overlay
+- a local-first drafting and sending tool
+- a companion for terminal-based AI agents
+
+Walkinal is not:
+
+- a standalone hosted AI product
+- a web chat app
+- a replacement for `Claude Code` or `Codex CLI`
+
+## Product Model
+
+Each tab has three distinct layers:
+
+1. **Attachments**
+   Files, screenshots, and pasted images are staged above the input bar.
+
+2. **Draft Queue**
+   Press `Enter` or click `Queue` to turn current input and attachments into queued items.
+
+3. **Sent History**
+   Sent items are stored per tab and globally, so recent sends remain visible and recoverable.
+
+## Core Actions
+
+- `Queue`
+  Add current text and attachments to the draft queue.
+
+- `Send`
+  Send the queued content into the terminal without executing.
+
+- `Run`
+  Send the queued content and execute immediately.
+
+Keyboard shortcuts:
+
+- `Enter` → Queue
+- `Cmd+Enter` → Run
 
 ## Features
 
-- **Floating overlay** — transparent, click-through window that stays on top. Toggle with `⌥ + Space` (fallback: `Cmd+Shift+K`).
-- **Multi-tab sessions** — each tab spawns its own `claude -p` process with independent session state.
-- **Permission approval UI** — intercepts tool calls via PreToolUse HTTP hooks so you can review and approve/deny from the UI.
-- **Conversation history** — browse and resume past Claude Code sessions.
-- **Skills marketplace** — install plugins from Anthropic's GitHub repos without leaving Clui CC.
-- **Voice input** — local speech-to-text via Whisper (required, installed automatically).
-- **File & screenshot attachments** — paste images or attach files directly.
-- **Dual theme** — dark/light mode with system-follow option.
+- **Floating overlay**
+  Transparent always-on-top macOS panel. Toggle with `⌥ + Space` (fallback: `Cmd+Shift+K`).
 
-## Why Clui CC
+- **Multi-tab workflow**
+  Each tab keeps its own draft queue, sent history, working directory, and attachments.
 
-- **Claude Code, but visual** — keep CLI power while getting a fast desktop UX for approvals, history, and multitasking.
-- **Human-in-the-loop safety** — tool calls are reviewed and approved in-app before execution.
-- **Session-native workflow** — each tab runs an independent Claude session you can resume later.
-- **Local-first** — everything runs through your local Claude CLI. No telemetry, no cloud dependency.
+- **Queue-first composition**
+  Draft multiple text blocks before sending anything.
 
-## How It Works
+- **File-aware sending**
+  Regular files are sent as path references, which works well for code and local documents.
 
-```
-UI prompt → Main process spawns claude -p → NDJSON stream → live render
-                                         → tool call? → permission UI → approve/deny
-```
+- **Image input support**
+  Images from file picker, paste, and screenshots are normalized into one image flow and can be sent as real image input to supported terminal agents.
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full deep-dive.
+- **Per-tab sent history**
+  Recent sends are kept with the tab for continuity after restart.
 
-## Install App (Recommended)
+- **Global local history**
+  Full send history is stored locally and can be browsed, searched, filtered, previewed, and restored.
 
-The fastest way to get Clui CC running as a regular Mac app. This installs dependencies, voice support (Whisper), builds the app, copies it to `/Applications`, and launches it.
+- **Draft persistence**
+  Tabs, draft queues, attachments, and sent summaries survive app restarts.
 
-**1) Clone the repo**
+- **Storage directory configuration**
+  You can move Walkinal data to a custom local folder.
 
-```bash
-git clone https://github.com/lcoutodemos/clui-cc.git
-```
+- **Voice input**
+  Local speech-to-text via Whisper.
 
-**2) Double-click `install-app.command`**
+- **Skills marketplace**
+  Marketplace support from the original project is still available.
 
-Open the `clui-cc` folder in Finder and double-click `install-app.command`.
+- **Dark / light theme**
+  Theme follows the existing system in the app.
 
-> **First launch:** macOS may block the app because it's unsigned. Go to **System Settings → Privacy & Security → Open Anyway**. You only need to do this once.
-> **Folder cleanup:** the installer removes temporary `dist/` and `release/` folders after a successful install to keep the repo tidy.
+## Send Semantics
 
-<p align="center"><img src="docs/shortcut.png" width="520" alt="Press Option + Space to show or hide Clui CC" /></p>
+Walkinal currently treats content types differently on purpose:
 
-After the initial install, just open **Clui CC** from your Applications folder or Spotlight.
+- **Text**
+  Sent as text.
 
-<details>
-<summary><strong>Terminal / Developer Commands</strong></summary>
+- **Regular files**
+  Sent as file path references, for example:
 
-Only `install-app.command` is kept at root intentionally for non-technical users. Developer scripts live in `commands/`.
+  ```text
+  [Attached file: /absolute/path/to/file]
+  ```
 
-### Quick Start (Terminal)
+- **Images**
+  Sent through image-input behavior for terminal tools that support pasted image input, rather than being downgraded to plain path text.
 
-```bash
-git clone https://github.com/lcoutodemos/clui-cc.git
-```
+## Local Storage
 
-```bash
-cd clui-cc
-```
+Walkinal stores local data in the configured storage directory, including:
 
-```bash
-./commands/setup.command
-```
+- `config.json`
+- `drafts.json`
+- `history.jsonl`
+- `history-index.json`
+- `tmp/`
 
-```bash
-./commands/start.command
-```
+`tmp/` is used for atomic writes and temporary storage internals.
 
-> Press **⌥ + Space** to show/hide the overlay. If your macOS input source claims that combo, use **Cmd+Shift+K**.
+## Install
 
-To stop:
+The quickest path is:
 
-```bash
-./commands/stop.command
-```
+1. Clone the repo
+2. Double-click `install-app.command`
 
-### Developer Workflow
+This flow:
+
+- installs dependencies
+- checks required tools
+- builds the app
+- copies it into `/Applications`
+- launches it
+
+> Because the app is unsigned, macOS may require manual approval on first launch.
+
+## Development
+
+### Install dependencies
 
 ```bash
 npm install
 ```
 
+### Start development mode
+
 ```bash
 npm run dev
 ```
 
-Renderer changes update instantly. Main-process changes require restarting `npm run dev`.
-
-### Other Commands
-
-| Command | Purpose |
-|---------|---------|
-| `./commands/setup.command` | Environment check + install dependencies |
-| `./commands/start.command` | Build and launch from source |
-| `./commands/stop.command` | Stop all Clui CC processes |
-| `npm run build` | Production build (no packaging) |
-| `npm run dist` | Package as macOS `.app` into `release/` |
-| `npm run doctor` | Run environment diagnostic |
-
-</details>
-
-<details>
-<summary><strong>Setup Prerequisites (Detailed)</strong></summary>
-
-You need **macOS 13+**. Then install these one at a time — copy each command and paste it into Terminal.
-
-**Step 1.** Install Xcode Command Line Tools (needed to compile native modules):
+### Build
 
 ```bash
-xcode-select --install
+npm run build
 ```
 
-**Step 2.** Install Node.js (recommended: current LTS such as 20 or 22; minimum supported: 18). Download from [nodejs.org](https://nodejs.org), or use Homebrew:
+### Package app
 
 ```bash
-brew install node
+npm run dist
 ```
 
-Verify it's on your PATH:
-
-```bash
-node --version
-```
-
-**Step 3.** Make sure Python has `setuptools` (needed by the native module compiler). On Python 3.12+ this is missing by default:
-
-```bash
-python3 -m pip install --upgrade pip setuptools
-```
-
-**Step 4.** Install Claude Code CLI:
-
-```bash
-npm install -g @anthropic-ai/claude-code
-```
-
-**Step 5.** Authenticate Claude Code (follow the prompts that appear):
-
-```bash
-claude
-```
-
-**Step 6.** Install Whisper for voice input:
-
-```bash
-# Apple Silicon (M1/M2/M3/M4) — preferred:
-brew install whisperkit-cli
-# Apple Silicon fallback, or Intel Mac:
-brew install whisper-cpp
-```
-
-> **No API keys or `.env` file required.** Clui CC uses your existing Claude Code CLI authentication (Pro/Team/Enterprise subscription).
-
-</details>
-
-<details>
-<summary><strong>Architecture and Internals</strong></summary>
-
-### Project Structure
-
-```
-src/
-├── main/                   # Electron main process
-│   ├── claude/             # ControlPlane, RunManager, EventNormalizer
-│   ├── hooks/              # PermissionServer (PreToolUse HTTP hooks)
-│   ├── marketplace/        # Plugin catalog fetching + install
-│   ├── skills/             # Skill auto-installer
-│   └── index.ts            # Window creation, IPC handlers, tray
-├── renderer/               # React frontend
-│   ├── components/         # TabStrip, ConversationView, InputBar, etc.
-│   ├── stores/             # Zustand session store
-│   ├── hooks/              # Event listeners, health reconciliation
-│   └── theme.ts            # Dual palette + CSS custom properties
-├── preload/                # Secure IPC bridge (window.clui API)
-└── shared/                 # Canonical types, IPC channel definitions
-```
-
-### How It Works
-
-1. Each tab creates a `claude -p --output-format stream-json` subprocess.
-2. NDJSON events are parsed by `RunManager` and normalized by `EventNormalizer`.
-3. `ControlPlane` manages tab lifecycle (connecting → idle → running → completed/failed/dead).
-4. Tool permission requests arrive via HTTP hooks to `PermissionServer` (localhost only).
-5. The renderer polls backend health every 1.5s and reconciles tab state.
-6. Sessions are resumed with `--resume <session-id>` for continuity.
-
-### Network Behavior
-
-Clui CC operates almost entirely offline. The only outbound network calls are:
-
-| Endpoint | Purpose | Required |
-|----------|---------|----------|
-| `raw.githubusercontent.com/anthropics/*` | Marketplace catalog (cached 5 min) | No — graceful fallback |
-| `api.github.com/repos/anthropics/*/tarball/*` | Skill auto-install on startup | No — skipped on failure |
-
-No telemetry, analytics, or auto-update mechanisms. All core Claude Code interaction goes through the local CLI.
-
-</details>
-
-## Troubleshooting
-
-For setup issues and recovery commands, see [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
-
-Quick self-check:
+### Doctor / environment check
 
 ```bash
 npm run doctor
 ```
 
-## Tested On
+## Development Notes
 
-| Component | Version |
-|-----------|---------|
-| macOS | 15.x (Sequoia) |
-| Node.js | 20.x LTS, 22.x |
-| Python | 3.12 (with setuptools installed) |
-| Electron | 33.x |
-| Claude Code CLI | 2.1.71 |
+- Renderer changes hot reload.
+- Main-process changes require restarting `npm run dev`.
+- The project is currently macOS-only.
 
-## Known Limitations
+## Runtime Requirements
 
-- **macOS only** — transparent overlay, tray icon, and node-pty are macOS-specific. Windows/Linux support is not currently implemented.
-- **Requires Claude Code CLI** — Clui CC is a UI layer, not a standalone AI client. You need an authenticated `claude` CLI.
-- **Permission mode** — uses `--permission-mode default`. The PTY interactive transport is legacy and disabled by default.
+You need:
+
+- macOS
+- Node.js
+- Python tooling for native module builds
+- terminal AI tools you want to drive, such as:
+  - `claude`
+  - `codex`
+
+For voice input, install one of:
+
+- `whisperkit-cli`
+- `whisper-cpp`
+
+## Architecture
+
+Current high-level flow:
+
+```text
+React renderer
+  -> preload bridge (window.clui)
+  -> Electron main process
+  -> local storage + Warp/terminal bridge
+  -> terminal session running Claude Code / Codex CLI
+```
+
+Unlike the original Clui CC interaction model, Walkinal no longer centers the product around a live Claude conversation timeline. It is centered around:
+
+- composing input
+- sending into terminal agents
+- preserving local drafts and history
+
+See:
+
+- [docs/walkinal-technical-plan.md](docs/walkinal-technical-plan.md)
+- [docs/performance-optimization-plan.md](docs/performance-optimization-plan.md)
+- [docs/development-workflow.md](docs/development-workflow.md)
+
+## Troubleshooting
+
+Use:
+
+```bash
+npm run doctor
+```
+
+For more detail, see:
+
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+
+## Current Scope
+
+Walkinal is already suitable for:
+
+- queueing text
+- sending files and images
+- sending mixed content in queue order
+- restoring tab state after restart
+- browsing local history
+
+It is still an actively iterated local tool, not a finished packaged product with broad platform support.
 
 ## License
 

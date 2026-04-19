@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Plus, X } from '@phosphor-icons/react'
 import { useSessionStore } from '../stores/sessionStore'
@@ -7,17 +7,17 @@ import { SettingsPopover } from './SettingsPopover'
 import { useColors } from '../theme'
 import type { TabStatus } from '../../shared/types'
 
-function StatusDot({ status, hasUnread, hasPermission }: { status: TabStatus; hasUnread: boolean; hasPermission: boolean }) {
+const TAB_CLICK_DELAY_MS = 180
+
+function StatusDot({ status, hasUnread, isActive }: { status: TabStatus; hasUnread: boolean; isActive: boolean }) {
   const colors = useColors()
   let bg: string = colors.statusIdle
   let pulse = false
-  let glow = false
 
-  if (status === 'dead' || status === 'failed') {
+  if (isActive) {
+    bg = colors.statusComplete
+  } else if (status === 'dead' || status === 'failed') {
     bg = colors.statusError
-  } else if (hasPermission) {
-    bg = colors.statusPermission
-    glow = true
   } else if (status === 'connecting' || status === 'running') {
     bg = colors.statusRunning
     pulse = true
@@ -28,10 +28,7 @@ function StatusDot({ status, hasUnread, hasPermission }: { status: TabStatus; ha
   return (
     <span
       className={`w-[6px] h-[6px] rounded-full flex-shrink-0 ${pulse ? 'animate-pulse-dot' : ''}`}
-      style={{
-        background: bg,
-        ...(glow ? { boxShadow: `0 0 6px 2px ${colors.statusPermissionGlow}` } : {}),
-      }}
+      style={{ background: bg }}
     />
   )
 }
@@ -40,9 +37,63 @@ export function TabStrip() {
   const tabs = useSessionStore((s) => s.tabs)
   const activeTabId = useSessionStore((s) => s.activeTabId)
   const selectTab = useSessionStore((s) => s.selectTab)
+  const renameTab = useSessionStore((s) => s.renameTab)
   const createTab = useSessionStore((s) => s.createTab)
   const closeTab = useSessionStore((s) => s.closeTab)
   const colors = useColors()
+  const [editingTabId, setEditingTabId] = useState<string | null>(null)
+  const [draftTitle, setDraftTitle] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+  const clickTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    if (editingTabId && inputRef.current) {
+      inputRef.current.focus()
+      inputRef.current.select()
+    }
+  }, [editingTabId])
+
+  useEffect(() => {
+    return () => {
+      if (clickTimeoutRef.current) {
+        clearTimeout(clickTimeoutRef.current)
+      }
+    }
+  }, [])
+
+  const startRename = (tabId: string, title: string) => {
+    if (clickTimeoutRef.current) {
+      clearTimeout(clickTimeoutRef.current)
+      clickTimeoutRef.current = null
+    }
+    setEditingTabId(tabId)
+    setDraftTitle(title)
+  }
+
+  const commitRename = () => {
+    if (!editingTabId) return
+    const fallbackTitle = tabs.find((tab) => tab.id === editingTabId)?.title || 'New Tab'
+    const nextTitle = draftTitle.trim() || fallbackTitle
+    renameTab(editingTabId, nextTitle)
+    setEditingTabId(null)
+    setDraftTitle('')
+  }
+
+  const handleTabClick = (tabId: string) => {
+    if (editingTabId) return
+    if (clickTimeoutRef.current) {
+      clearTimeout(clickTimeoutRef.current)
+    }
+    clickTimeoutRef.current = setTimeout(() => {
+      selectTab(tabId)
+      clickTimeoutRef.current = null
+    }, TAB_CLICK_DELAY_MS)
+  }
+
+  const cancelRename = () => {
+    setEditingTabId(null)
+    setDraftTitle('')
+  }
 
   return (
     <div
@@ -68,6 +119,7 @@ export function TabStrip() {
           <AnimatePresence mode="popLayout">
             {tabs.map((tab) => {
               const isActive = tab.id === activeTabId
+              const isEditing = tab.id === editingTabId
               return (
                 <motion.div
                   key={tab.id}
@@ -76,7 +128,8 @@ export function TabStrip() {
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.9 }}
                   transition={{ duration: 0.15 }}
-                  onClick={() => selectTab(tab.id)}
+                  onClick={() => handleTabClick(tab.id)}
+                  onDoubleClick={() => startRename(tab.id, tab.title)}
                   className="group flex items-center gap-1.5 cursor-pointer select-none flex-shrink-0 max-w-[160px] transition-all duration-150"
                   style={{
                     background: isActive ? colors.tabActive : 'transparent',
@@ -88,8 +141,30 @@ export function TabStrip() {
                     fontWeight: isActive ? 500 : 400,
                   }}
                 >
-                  <StatusDot status={tab.status} hasUnread={tab.hasUnread} hasPermission={tab.permissionQueue.length > 0} />
-                  <span className="truncate flex-1">{tab.title}</span>
+                  <StatusDot status={tab.status} hasUnread={tab.hasUnread} isActive={isActive} />
+                  {isEditing ? (
+                    <input
+                      ref={inputRef}
+                      value={draftTitle}
+                      onChange={(e) => setDraftTitle(e.target.value)}
+                      onClick={(e) => e.stopPropagation()}
+                      onBlur={commitRename}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault()
+                          commitRename()
+                        }
+                        if (e.key === 'Escape') {
+                          e.preventDefault()
+                          cancelRename()
+                        }
+                      }}
+                      className="flex-1 bg-transparent outline-none min-w-0"
+                      style={{ color: colors.textPrimary, fontSize: 12 }}
+                    />
+                  ) : (
+                    <span className="truncate flex-1">{tab.title}</span>
+                  )}
                   {tabs.length > 1 && (
                     <button
                       onClick={(e) => { e.stopPropagation(); closeTab(tab.id) }}
