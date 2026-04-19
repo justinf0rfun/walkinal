@@ -15,6 +15,19 @@ Its core workflow is:
 draft -> queue -> send -> send and run
 ```
 
+## Name
+
+Walkinal is a blended name:
+
+```text
+Walkinal = Walkie + Terminal
+```
+
+- **Walki** comes from **Walkie**, preserving the conversational companion feel.
+- **nal** comes from **Terminal**, preserving the terminal-oriented workflow.
+
+The name reflects the product's role as a lightweight companion layered on top of terminal-native AI work, rather than replacing the terminal itself.
+
 ## What It Is
 
 Walkinal is:
