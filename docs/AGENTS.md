@@ -1,139 +1,66 @@
-# Agent Guide — Walkinal
+# Agent Guide — Docs Scope
 
-> This file is optimized for AI coding agents.
-> For human-readable docs see [ARCHITECTURE.md](ARCHITECTURE.md).
+This file applies only to `docs/` and its child paths.
 
-## What This Project Is
+Repository-wide engineering and stability rules live in the repo-root [`AGENTS.md`](../AGENTS.md).
 
-Walkinal is a **macOS-only Electron overlay** for terminal-native AI workflows.
+## Purpose
 
-It is:
+Files in `docs/` should describe the project clearly and reflect the current Walkinal direction.
 
-- a floating drafting surface
-- a queue-first sender for text, files, and images
-- a local-first companion for tools like `claude` and `codex`
+Use `docs/` for:
 
-It is not:
+- current product and architecture documentation
+- progress tracking
+- test strategy
+- troubleshooting
+- historical planning material that is explicitly labeled as historical
 
-- a hosted chat product
-- a browser app
-- a replacement for the terminal itself
+## Docs Rules
 
-Current send target implementation is **Warp** via AppleScript automation.
+1. Prefer Walkinal terminology over legacy `Clui CC` naming unless the document is explicitly historical.
+2. If a document is historical, mark that clearly near the top.
+3. Keep current-state docs aligned with the actual codebase.
+4. Do not describe planned architecture as if it is already implemented.
+5. When documenting unstable or future work, label it as planned, proposed, or pending.
 
-## Quick Reference
+## Scope-Specific Expectations
 
-| Action | Command |
-|--------|---------|
-| Install deps | `npm install` |
-| Dev mode | `npm run dev` |
-| Build | `npm run build` |
-| Package app | `npm run dist` |
-| Doctor | `npm run doctor` |
-| Toggle overlay | `⌥ + Space` (fallback: `Cmd+Shift+K`) |
-| Debug logging | `CLUI_DEBUG=1 npm run dev` |
+### Current-state docs
 
-**Main-process changes require full restart.** Renderer changes hot reload.
+Examples:
 
-## Architecture
+- `feature-progress.md`
+- `ARCHITECTURE.md`
+- `TROUBLESHOOTING.md`
+- release or smoke-test docs
 
-```
-Renderer (React 19 + Zustand 5 + Tailwind CSS 4)
-    ↕  contextBridge IPC (src/preload/index.ts)
-Main Process (Electron)
-    ↕  local storage + Warp bridge + marketplace
-Warp terminal session
-```
+These should:
 
-### Layer Responsibilities
+- reflect what the code does today
+- avoid stale references to removed Claude conversation architecture
+- be updated when behavior changes materially
 
-| Layer | Directory | Manages |
-|-------|-----------|---------|
-| **Renderer** | `src/renderer/` | tabs, queue UI, history UI, attachments, settings |
-| **Preload** | `src/preload/` | typed IPC bridge (`window.clui`, legacy name) |
-| **Main** | `src/main/` | window lifecycle, storage, file/screenshot handling, Warp send bridge, marketplace |
+### Historical docs
 
-### Key Files by Concern
+Examples:
 
-| Concern | File(s) |
-|---------|---------|
-| Main window and IPC handlers | `src/main/index.ts` |
-| Warp send bridge | `src/main/warp-bridge.ts` |
-| Draft persistence | `src/main/storage/drafts-store.ts` |
-| Config persistence | `src/main/storage/config-store.ts` |
-| History + history index | `src/main/storage/history-store.ts` |
-| Shared types and IPC names | `src/shared/types.ts` |
-| Renderer state store | `src/renderer/stores/sessionStore.ts` |
-| Theme tokens | `src/renderer/theme.ts` |
-| Main shell UI | `src/renderer/App.tsx` |
-| Queue and sent history view | `src/renderer/components/ConversationView.tsx` |
-| Input + attachments + voice | `src/renderer/components/InputBar.tsx` |
+- early PRD material
+- migration plans
+- experiment writeups
 
-## Data Flow: Draft → Queue → Send
+These may keep old assumptions, but they must:
 
-```
-InputBar.tsx
-  → sessionStore.enqueueDraft()
-  → queueItems added to active tab
-  → sessionStore.sendQueuedItems(run)
-  → ipcRenderer.invoke(IPC.WALKINAL_QUEUE_SEND_* ...)
-  → src/main/index.ts
-  → src/main/warp-bridge.ts
-  → AppleScript paste into Warp
-  → history append + sentEntries update
-  → React re-renders
-```
+- say they are historical
+- avoid being mistaken for current implementation truth
 
-## Canonical Types
+## Progress Tracking
 
-All shared types live in `src/shared/types.ts`. Key ones:
+When editing `feature-progress.md`:
 
-- `TabState` — per-tab queue, attachments, working directory, sent history
-- `QueueItem` — staged text/file/image item
-- `HistoryEntry` — full persisted send record
-- `HistoryIndexEntry` — lightweight searchable history summary
-- `WalkinalConfig` — storage directory and terminal target
-- `IPC` — const object of all IPC channel names
-
-## Must Follow
-
-1. `npm run build` must pass.
-2. Use `IPC.*` constants for IPC channel names.
-3. Use `useColors()` for renderer colors.
-4. Add new preload methods in both `src/preload/index.ts` and `src/shared/types.ts`.
-5. Keep renderer/main separation strict; cross only through preload IPC.
-6. Preserve local-first behavior. Do not introduce network dependencies for core drafting/sending.
-
-## Current Constraints
-
-- `window.clui` is still the preload global name for compatibility. Do not rename it casually.
-- IPC channel names still use the `clui:` prefix. Treat that as internal compatibility surface.
-- Current terminal automation targets Warp only.
-- Storage lives under the configured local storage directory and includes `drafts.json`, `history.jsonl`, `history-index.json`, and `tmp/`.
-
-## Adding a Feature
-
-### New IPC channel
-1. Add it to `IPC` in `src/shared/types.ts`.
-2. Handle it in `src/main/index.ts`.
-3. Expose it from `src/preload/index.ts`.
-4. Call it from renderer via `window.clui.*`.
-
-### New persisted field
-1. Add the type in `src/shared/types.ts`.
-2. Update the corresponding storage file logic in `src/main/storage/`.
-3. Update bootstrap/restore logic in `src/renderer/stores/sessionStore.ts`.
-
-### New queue or send behavior
-1. Model it in `QueueItem` / related types.
-2. Update queue formatting logic in `sessionStore.ts`.
-3. Update send bridge behavior in `src/main/warp-bridge.ts`.
-4. Verify history persistence still records the result correctly.
-
-## Common Pitfalls
-
-1. Forgetting to restart `npm run dev` after main-process changes.
-2. Breaking draft persistence by mutating renderer state without updating storage mapping.
-3. Treating screenshots as text-only attachments instead of image-send steps.
-4. Renaming `window.clui` or `clui:*` IPC prefixes without a deliberate migration plan.
-5. Assuming this project still uses live Claude conversation state. It does not.
+- keep completed work and backlog status aligned
+- if an item appears in both a section list and `P0/P1/P2`, update both
+- distinguish between:
+  - shipped behavior
+  - designed but not connected behavior
+  - planned future work
