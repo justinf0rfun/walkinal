@@ -154,15 +154,28 @@ function collectImagePaths(items: QueueItem[]): string[] {
 }
 
 function buildQueueSendSteps(items: QueueItem[]): Array<{ type: 'text'; text: string } | { type: 'image'; path: string }> {
-  return items.flatMap((item) => {
+  const steps: Array<{ type: 'text'; text: string } | { type: 'image'; path: string }> = []
+
+  items.forEach((item) => {
     if (item.type === 'screenshot') {
       const path = item.metadata?.filePath?.trim()
-      return path ? [{ type: 'image' as const, path }] : []
+      if (!path) return
+      if (steps.length > 0) {
+        steps.push({ type: 'text', text: '\n\n' })
+      }
+      steps.push({ type: 'image', path })
+      return
     }
 
     const text = formatQueueItemForWarp(item).trim()
-    return text ? [{ type: 'text' as const, text }] : []
+    if (!text) return
+    if (steps.length > 0) {
+      steps.push({ type: 'text', text: '\n\n' })
+    }
+    steps.push({ type: 'text', text })
   })
+
+  return steps
 }
 
 function queueItemsFromHistoryEntry(entry: HistoryEntry): QueueItem[] {

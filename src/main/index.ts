@@ -66,7 +66,7 @@ const walkinalHistoryStore = new HistoryStore(() => walkinalConfigStore.ensureSt
 // Keep native width fixed to avoid renderer animation vs setBounds race.
 // The UI itself still launches in compact mode; extra width is transparent/click-through.
 const BAR_WIDTH = 1040
-const PILL_HEIGHT = 720  // Fixed native window height — extra room for expanded UI + shadow buffers
+const PILL_HEIGHT = 820  // Fixed native window height — gives draft/queue more visible space
 const PILL_BOTTOM_MARGIN = 24
 
 // ─── Broadcast to renderer ───

@@ -88,7 +88,7 @@ export default function App() {
   const dragRef = useRef<{ startX: number; startY: number } | null>(null)
 
   // Vertical position tracking — window moves first (until macOS clamps it), then CSS overflows
-  const PILL_HEIGHT_CONST = 720
+  const PILL_HEIGHT_CONST = 820
   const PILL_BOTTOM_MARGIN_CONST = 24
   const minWindowY = window.screen.availTop   // top of work area (below menu bar)
   const initialWindowY = window.screen.availTop + window.screen.availHeight - PILL_HEIGHT_CONST - PILL_BOTTOM_MARGIN_CONST
@@ -220,7 +220,7 @@ export default function App() {
   const cardExpandedWidth = expandedUI ? 700 : 460
   const cardCollapsedWidth = expandedUI ? 670 : 430
   const cardCollapsedMargin = expandedUI ? 15 : 15
-  const bodyMaxHeight = expandedUI ? 520 : 400
+  const bodyMaxHeight = expandedUI ? 620 : 480
 
   const handleScreenshot = useCallback(async () => {
     const result = await window.clui.takeScreenshot()

@@ -9,8 +9,8 @@ import type { QueueItem, SentEntry } from '../../shared/types'
 
 // ─── Constants ───
 
-const DRAFT_PANEL_MAX_HEIGHT_EXPANDED = 220
-const DRAFT_PANEL_MAX_HEIGHT_COMPACT = 168
+const DRAFT_PANEL_MAX_HEIGHT_EXPANDED = 280
+const DRAFT_PANEL_MAX_HEIGHT_COMPACT = 220
 
 // ─── Main Component ───
 
@@ -57,6 +57,16 @@ export function ConversationView() {
     }
   }, [scrollTrigger])
 
+  useEffect(() => {
+    if (!historyExpanded || !scrollRef.current) return
+    requestAnimationFrame(() => {
+      const el = scrollRef.current
+      if (!el) return
+      el.scrollTop = el.scrollHeight
+      isNearBottomRef.current = true
+    })
+  }, [historyExpanded, sentCount])
+
   if (!tab) return null
 
   const isRunning = tab.status === 'running' || tab.status === 'connecting'
@@ -77,7 +87,9 @@ export function ConversationView() {
     <div data-clui-ui>
       <div
         className="flex flex-col overflow-hidden"
-        style={{ maxHeight: expandedUI ? 460 : 336 }}
+        style={{
+          maxHeight: expandedUI ? 560 : 420,
+        }}
       >
         <div
           ref={scrollRef}
@@ -86,14 +98,16 @@ export function ConversationView() {
           onScroll={handleScroll}
         >
           {tab.sentEntries.length > 0 && (
-            <div className="space-y-2 pb-3">
+            <div className="pb-3">
               <button
                 onClick={() => setHistoryExpanded((prev) => !prev)}
-                className="w-full flex items-center justify-between text-left rounded-xl px-3 py-2 transition-colors"
+                className="w-full flex items-center justify-between text-left rounded-xl px-3 py-2 transition-colors sticky top-0"
                 style={{
+                  marginBottom: historyExpanded ? 8 : 0,
                   background: colors.surfaceHover,
                   border: `1px solid ${colors.toolBorder}`,
                   color: colors.textSecondary,
+                  zIndex: 3,
                 }}
               >
                 <span className="text-[11px] uppercase tracking-[0.12em]">Sent History</span>
@@ -114,9 +128,13 @@ export function ConversationView() {
                   </span>
                 </span>
               </button>
-              {historyExpanded && tab.sentEntries.map((entry) => (
-                <SentHistoryItem key={entry.id} entry={entry} />
-              ))}
+              {historyExpanded && (
+                <div className="space-y-2">
+                  {tab.sentEntries.map((entry) => (
+                    <SentHistoryItem key={entry.id} entry={entry} />
+                  ))}
+                </div>
+              )}
             </div>
           )}
           <div ref={bottomRef} />
@@ -126,6 +144,7 @@ export function ConversationView() {
           <div
             className="px-4 pt-3 pb-2 flex-shrink-0"
             style={{
+              minHeight: expandedUI ? 190 : 156,
               borderTop: `1px solid ${colors.toolBorder}`,
               background: `linear-gradient(to bottom, ${colors.containerBg}, ${colors.containerBgCollapsed})`,
             }}
@@ -152,6 +171,9 @@ export function ConversationView() {
               <div
                 className="rounded-2xl px-3 py-3 text-[12px]"
                 style={{
+                  minHeight: expandedUI ? 86 : 72,
+                  display: 'flex',
+                  alignItems: 'center',
                   color: colors.textTertiary,
                   background: colors.surfacePrimary,
                   border: `1px solid ${colors.toolBorder}`,
@@ -215,7 +237,7 @@ function EmptyState() {
   return (
     <div
       className="flex flex-col items-center justify-center px-4 py-3 gap-1.5"
-      style={{ minHeight: 80 }}
+      style={{ minHeight: 140 }}
     >
       <button
         onClick={handleChooseFolder}
