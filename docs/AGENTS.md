@@ -1,163 +1,139 @@
-# Agent Guide — Clui CC
+# Agent Guide — Walkinal
 
-> This file is optimized for AI coding agents (Claude Code, Cursor, Copilot, etc.).
-> For human-readable docs see [ARCHITECTURE.md](ARCHITECTURE.md) and [CONTRIBUTING.md](../CONTRIBUTING.md).
+> This file is optimized for AI coding agents.
+> For human-readable docs see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## What This Project Is
 
-Clui CC is a **macOS-only Electron overlay** that wraps the Claude Code CLI (`claude -p --output-format stream-json`) in a floating pill UI. It is NOT a web app, NOT a VS Code extension, and does NOT call the Anthropic API directly — it spawns CLI subprocesses.
+Walkinal is a **macOS-only Electron overlay** for terminal-native AI workflows.
+
+It is:
+
+- a floating drafting surface
+- a queue-first sender for text, files, and images
+- a local-first companion for tools like `claude` and `codex`
+
+It is not:
+
+- a hosted chat product
+- a browser app
+- a replacement for the terminal itself
+
+Current send target implementation is **Warp** via AppleScript automation.
 
 ## Quick Reference
 
 | Action | Command |
 |--------|---------|
 | Install deps | `npm install` |
-| Dev mode (hot-reload) | `npm run dev` |
-| Type-check / build | `npm run build` |
+| Dev mode | `npm run dev` |
+| Build | `npm run build` |
+| Package app | `npm run dist` |
+| Doctor | `npm run doctor` |
 | Toggle overlay | `⌥ + Space` (fallback: `Cmd+Shift+K`) |
-| Debug logging | `CLUI_DEBUG=1 npm run dev` (writes to `~/.clui-debug.log`) |
+| Debug logging | `CLUI_DEBUG=1 npm run dev` |
 
-**Main process changes require full restart.** Renderer changes hot-reload.
+**Main-process changes require full restart.** Renderer changes hot reload.
 
-## Architecture (3-Layer)
+## Architecture
 
 ```
 Renderer (React 19 + Zustand 5 + Tailwind CSS 4)
     ↕  contextBridge IPC (src/preload/index.ts)
-Main Process (Node.js / Electron 33)
-    ↕  spawns subprocess
-Claude Code CLI (claude -p --output-format stream-json)
+Main Process (Electron)
+    ↕  local storage + Warp bridge + marketplace
+Warp terminal session
 ```
 
 ### Layer Responsibilities
 
 | Layer | Directory | Manages |
 |-------|-----------|---------|
-| **Renderer** | `src/renderer/` | UI state, theming, user input, message display |
-| **Preload** | `src/preload/` | Typed IPC bridge (`window.clui` API). Security boundary. |
-| **Main** | `src/main/` | Process lifecycle, tab state machine, permission server, marketplace |
+| **Renderer** | `src/renderer/` | tabs, queue UI, history UI, attachments, settings |
+| **Preload** | `src/preload/` | typed IPC bridge (`window.clui`, legacy name) |
+| **Main** | `src/main/` | window lifecycle, storage, file/screenshot handling, Warp send bridge, marketplace |
 
 ### Key Files by Concern
 
 | Concern | File(s) |
 |---------|---------|
-| Tab lifecycle & state machine | `src/main/claude/control-plane.ts` |
-| Spawning Claude CLI processes | `src/main/claude/run-manager.ts` |
-| Raw NDJSON → canonical events | `src/main/claude/event-normalizer.ts` |
-| Permission hook server | `src/main/hooks/permission-server.ts` |
-| All TypeScript types & IPC channels | `src/shared/types.ts` |
-| Zustand state store | `src/renderer/stores/sessionStore.ts` |
-| Theme / color system | `src/renderer/theme.ts` |
-| Main window & IPC handler setup | `src/main/index.ts` |
-| Marketplace catalog | `src/main/marketplace/catalog.ts` |
-| Skill installer | `src/main/skills/installer.ts` |
+| Main window and IPC handlers | `src/main/index.ts` |
+| Warp send bridge | `src/main/warp-bridge.ts` |
+| Draft persistence | `src/main/storage/drafts-store.ts` |
+| Config persistence | `src/main/storage/config-store.ts` |
+| History + history index | `src/main/storage/history-store.ts` |
+| Shared types and IPC names | `src/shared/types.ts` |
+| Renderer state store | `src/renderer/stores/sessionStore.ts` |
+| Theme tokens | `src/renderer/theme.ts` |
+| Main shell UI | `src/renderer/App.tsx` |
+| Queue and sent history view | `src/renderer/components/ConversationView.tsx` |
+| Input + attachments + voice | `src/renderer/components/InputBar.tsx` |
 
-## Data Flow: Prompt → Response
+## Data Flow: Draft → Queue → Send
 
 ```
-InputBar.tsx → window.clui.prompt(tabId, requestId, opts)
-  → ipcRenderer.invoke('clui:prompt')
-  → ControlPlane.prompt()
-  → RunManager spawns: claude -p --output-format stream-json --resume <sid>
-  → stdout emits NDJSON lines
-  → EventNormalizer → NormalizedEvent
-  → ControlPlane broadcasts via IPC
-  → useClaudeEvents hook → sessionStore.handleNormalizedEvent()
+InputBar.tsx
+  → sessionStore.enqueueDraft()
+  → queueItems added to active tab
+  → sessionStore.sendQueuedItems(run)
+  → ipcRenderer.invoke(IPC.WALKINAL_QUEUE_SEND_* ...)
+  → src/main/index.ts
+  → src/main/warp-bridge.ts
+  → AppleScript paste into Warp
+  → history append + sentEntries update
   → React re-renders
 ```
 
 ## Canonical Types
 
-All IPC and event types live in `src/shared/types.ts`. Key types:
+All shared types live in `src/shared/types.ts`. Key ones:
 
-- **`NormalizedEvent`** — union of all events the main process emits to the renderer
-- **`TabState`** — full state of a single tab (status, messages, permissions, session metadata)
-- **`TabStatus`** — state machine: `connecting → idle → running → completed/failed/dead`
-- **`IPC`** — const object with all IPC channel names (use these, never raw strings)
-- **`RunOptions`** — options passed when spawning a Claude CLI run
-- **`CatalogPlugin`** — marketplace plugin metadata
+- `TabState` — per-tab queue, attachments, working directory, sent history
+- `QueueItem` — staged text/file/image item
+- `HistoryEntry` — full persisted send record
+- `HistoryIndexEntry` — lightweight searchable history summary
+- `WalkinalConfig` — storage directory and terminal target
+- `IPC` — const object of all IPC channel names
 
-## Conventions & Rules
+## Must Follow
 
-### Must Follow
+1. `npm run build` must pass.
+2. Use `IPC.*` constants for IPC channel names.
+3. Use `useColors()` for renderer colors.
+4. Add new preload methods in both `src/preload/index.ts` and `src/shared/types.ts`.
+5. Keep renderer/main separation strict; cross only through preload IPC.
+6. Preserve local-first behavior. Do not introduce network dependencies for core drafting/sending.
 
-1. **TypeScript strict mode** — zero errors required (`npm run build` must pass)
-2. **Use `IPC.*` constants** for all IPC channel names — never hardcode strings
-3. **Use `useColors()` hook** for all color references in renderer — never hardcode colors
-4. **Narrow Zustand selectors** with custom equality functions for performance
-5. **All new IPC channels** must be added to `src/shared/types.ts` AND wired in both `src/preload/index.ts` and `src/main/index.ts`
-6. **Tab state transitions** go through `ControlPlane` only — never mutate tab state directly
+## Current Constraints
 
-### Security — Do Not Break
+- `window.clui` is still the preload global name for compatibility. Do not rename it casually.
+- IPC channel names still use the `clui:` prefix. Treat that as internal compatibility surface.
+- Current terminal automation targets Warp only.
+- Storage lives under the configured local storage directory and includes `drafts.json`, `history.jsonl`, `history-index.json`, and `tmp/`.
 
-- **Permission server** binds to `127.0.0.1` only (never `0.0.0.0`)
-- **Per-launch app secret** (random UUID) validates hook requests — do not weaken
-- **Per-run tokens** route permission responses to correct tab — do not bypass
-- **`CLAUDECODE` env var** is explicitly removed from spawned processes
-- **Sensitive fields** (tokens, passwords, secrets, keys, auth, credentials) are masked via `maskSensitiveFields()` before display
-- **5-minute auto-deny timeout** on unanswered permissions — do not remove
-
-### Don't
-
-- Don't import main-process modules from renderer (or vice versa) — the preload bridge is the only crossing point
-- Don't add network calls — the app is designed to be nearly offline (only marketplace fetches from GitHub)
-- Don't use `node-pty` for new features — it's legacy, prefer `RunManager` (stdio-based)
-- Don't add Electron `remote` module usage — it's disabled for security
-
-## Adding a New Feature — Checklist
+## Adding a Feature
 
 ### New IPC channel
-1. Add channel name to `IPC` const in `src/shared/types.ts`
-2. Add handler in `src/main/index.ts` (`ipcMain.handle` or `ipcMain.on`)
-3. Expose via `contextBridge` in `src/preload/index.ts`
-4. Call from renderer via `window.clui.*`
+1. Add it to `IPC` in `src/shared/types.ts`.
+2. Handle it in `src/main/index.ts`.
+3. Expose it from `src/preload/index.ts`.
+4. Call it from renderer via `window.clui.*`.
 
-### New UI component
-1. Create in `src/renderer/components/`
-2. Use `useColors()` for all colors
-3. Use Phosphor icons (`@phosphor-icons/react`) — not other icon libraries
-4. Animations via Framer Motion
+### New persisted field
+1. Add the type in `src/shared/types.ts`.
+2. Update the corresponding storage file logic in `src/main/storage/`.
+3. Update bootstrap/restore logic in `src/renderer/stores/sessionStore.ts`.
 
-### New event type from Claude CLI
-1. Add raw type to `ClaudeEvent` union in `src/shared/types.ts`
-2. Add normalized form to `NormalizedEvent` union
-3. Handle in `EventNormalizer.normalize()` (`src/main/claude/event-normalizer.ts`)
-4. Handle in `sessionStore.handleNormalizedEvent()` (`src/renderer/stores/sessionStore.ts`)
-
-### New tab state field
-1. Add to `TabState` interface in `src/shared/types.ts`
-2. Initialize in `createTab()` in both `ControlPlane` and `sessionStore`
-3. Update via `ControlPlane` events — never directly from renderer
-
-## Stack
-
-| Layer | Tech | Version |
-|-------|------|---------|
-| Desktop | Electron | 33 |
-| Build | electron-vite | 3 |
-| UI | React | 19 |
-| State | Zustand | 5 |
-| Styling | Tailwind CSS | 4 |
-| Animation | Framer Motion | 12 |
-| Icons | Phosphor Icons | 2 |
-| Markdown | react-markdown + remark-gfm | 9 / 4 |
-| PTY (legacy) | node-pty | 1.1 |
-
-## Network Surface
-
-| Endpoint | Purpose | Required |
-|----------|---------|----------|
-| `raw.githubusercontent.com/anthropics/*` | Marketplace catalog (cached 5 min) | No |
-| `api.github.com/repos/anthropics/*/tarball/*` | Skill auto-install | No |
-| `127.0.0.1:19836` | Permission hook server (local only) | Yes |
-
-No telemetry. No analytics. No auto-update.
+### New queue or send behavior
+1. Model it in `QueueItem` / related types.
+2. Update queue formatting logic in `sessionStore.ts`.
+3. Update send bridge behavior in `src/main/warp-bridge.ts`.
+4. Verify history persistence still records the result correctly.
 
 ## Common Pitfalls
 
-1. **Forgetting to restart dev server** after main-process changes — renderer hot-reloads but main does not
-2. **Adding raw color values** instead of using `useColors()` — breaks theming
-3. **Mutating tab state from renderer** instead of going through ControlPlane events
-4. **Hardcoding IPC strings** instead of using `IPC.*` constants
-5. **Testing on non-macOS** — this is macOS-only (transparent windows, node-pty bindings)
-6. **Not handling the `session_dead` event** — if a Claude process crashes, the tab must transition to `dead` status
+1. Forgetting to restart `npm run dev` after main-process changes.
+2. Breaking draft persistence by mutating renderer state without updating storage mapping.
+3. Treating screenshots as text-only attachments instead of image-send steps.
+4. Renaming `window.clui` or `clui:*` IPC prefixes without a deliberate migration plan.
+5. Assuming this project still uses live Claude conversation state. It does not.

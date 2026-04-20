@@ -102,16 +102,24 @@ EOF
 
 Then retry `npm install`.
 
-## App Launches but No Claude Response
+## Queue Sends but Nothing Appears in Warp
 
-Verify Claude CLI is installed and authenticated:
+Check these first:
+
+- Warp is installed and already running
+- The target Warp window is frontmost after send starts
+- macOS Accessibility permission is granted to Walkinal / your dev Electron build
+
+If sends still fail, run in dev mode and inspect logs:
 
 ```bash
-claude --version
+CLUI_DEBUG=1 npm run dev
 ```
 
+Also verify AppleScript automation works in Terminal:
+
 ```bash
-claude
+osascript -e 'tell application "Warp" to activate'
 ```
 
 ## `⌥ + Space` Does Not Toggle
@@ -132,7 +140,7 @@ To allow it:
 
 1. Open **System Settings → Privacy & Security**
 2. Scroll to the security section
-3. Click **Open Anyway** next to the Clui CC message
+3. Click **Open Anyway** next to the Walkinal message
 
 You only need to do this once. This is a local build, not App Store distribution.
 
@@ -196,6 +204,12 @@ npm run dist
 ## Marketplace Shows "Failed to Load"
 
 Expected when offline. Marketplace needs internet access; core app features continue to work.
+
+## History Looks Empty After Changing Storage Folder
+
+Walkinal stores `drafts.json`, `history.jsonl`, and `history-index.json` inside the configured storage folder.
+
+If you switch folders, you are switching to a different local data set. Re-select the previous folder if you need the earlier drafts/history back.
 
 ## Window Is Invisible / No UI
 

@@ -1,12 +1,14 @@
 # Release Smoke Test
 
+> Current target: Walkinal queue-first workflow, not the original Claude conversation shell.
+
 ## Build Verification
 
 ### Fresh Clone Bootstrap
 
 ```bash
-git clone https://github.com/lcoutodemos/clui-cc.git
-cd clui-cc
+git clone https://github.com/justinf0rfun/walkinal.git
+cd walkinal
 npm run doctor     # verify environment — all checks should pass
 npm install        # installs deps + runs postinstall (electron-builder install-app-deps + icon patch)
 npm run build      # production build — must exit 0 with no errors
@@ -19,12 +21,12 @@ npm run build      # production build — must exit 0 with no errors
 - clang++ available with working C++ headers
 - `node --version` returns 18+
 - `python3` available with `distutils` importable
-- `claude --version` returns 2.1+
+- Warp installed and running for send smoke tests
 
 **Expected output:**
-- `dist/main/index.js` — ~117 KB
+- `dist/main/index.js` — ~75 KB
 - `dist/preload/index.js` — ~6 KB
-- `dist/renderer/index.html` + `assets/index-*.js` (~1.5 MB) + `assets/index-*.css` (~25 KB)
+- `dist/renderer/index.html` + `assets/index-*.js` (~1.1 MB) + `assets/index-*.css` (~25 KB)
 
 ### TypeScript
 
@@ -39,7 +41,7 @@ npm run build      # production build — must exit 0 with no errors
 - [ ] macOS 13+
 - [ ] Xcode Command Line Tools installed (`xcode-select -p` returns a path)
 - [ ] Node.js 18+
-- [ ] `claude` CLI installed and authenticated (`claude --version` returns 2.1+)
+- [ ] Warp installed and currently running
 
 ### Startup
 - [ ] `npm run dev` or `./commands/start.command` launches the app
@@ -53,32 +55,30 @@ npm run build      # production build — must exit 0 with no errors
 - [ ] Click `+` creates a new tab
 - [ ] Clicking tab switches active tab
 - [ ] Tab shows correct status dot (idle = gray, running = orange, completed = green)
+- [ ] Tab title can be renamed
 
-### Prompt & Response
-- [ ] Type a prompt and press Enter
-- [ ] Tab status changes to "running" (orange dot)
-- [ ] Text streams into conversation view
-- [ ] Tool calls appear as expandable cards
-- [ ] Task completes, status changes to "completed" (green dot)
-- [ ] Cost/tokens shown in status bar
-
-### Permission System
-- [ ] When Claude tries to use a tool, a permission card appears
-- [ ] "Allow" lets the tool run
-- [ ] "Deny" blocks the tool
-- [ ] Permission denial is reflected in task completion
+### Queue & Send
+- [ ] Type text and press `Enter` to queue it
+- [ ] Queued item appears in `ConversationView`
+- [ ] `Cmd+Enter` sends queued content and runs immediately
+- [ ] Send without run pastes into Warp without executing
+- [ ] Successful send clears the queue and adds a sent-history summary
+- [ ] Mixed queue order is preserved for text + image sends
 
 ### Settings
 - [ ] Three-dot button in tab strip opens settings popover
 - [ ] Sound toggle works (on/off)
-- [ ] Theme picker works (System/Light/Dark)
-- [ ] UI size toggle works (Compact/Expanded)
-- [ ] Settings persist across restart (localStorage)
+- [ ] Dark theme toggle works
+- [ ] Full width toggle works
+- [ ] Storage folder picker works
+- [ ] Settings persist across restart
 
 ### History
-- [ ] Clock icon opens session history picker
-- [ ] Previous sessions listed with timestamps
-- [ ] Clicking a session loads its messages
+- [ ] Clock icon opens history picker
+- [ ] Previous sends are listed with timestamps
+- [ ] Search narrows results
+- [ ] Filter chips narrow by mode
+- [ ] Clicking an entry restores its content into the current tab queue
 
 ### Marketplace
 - [ ] HeadCircuit (brain) button opens marketplace panel
@@ -99,6 +99,8 @@ npm run build      # production build — must exit 0 with no errors
 - [ ] Camera button takes screenshot
 - [ ] Pasting an image from clipboard works
 - [ ] Attachment chips appear below input
+- [ ] Files are queued as file references
+- [ ] Images are sent as image steps, not downgraded to plain text paths
 
 ### Theme
 - [ ] Dark mode: warm dark surfaces, orange accent
@@ -117,13 +119,13 @@ npm run build      # production build — must exit 0 with no errors
 - [ ] App launches and is usable without network
 - [ ] Marketplace shows error state with "Retry" button
 - [ ] Skill auto-install silently skips on failure
-- [ ] All prompt/response functionality works (uses local CLI)
+- [ ] Drafting, queueing, local history, and Warp sends still work without marketplace access
 
 ## Last Verified
 
 - **Date:** 2026-03-12
 - **Node:** v22.x
 - **Electron:** 33.x
-- **Claude CLI:** 2.1.71
+- **Warp:** current stable
 - **macOS:** 15.x (Sequoia)
 - **Build result:** Pass (zero build errors)

@@ -2,7 +2,7 @@
 
 Walkinal is a macOS floating input companion for terminal-native AI workflows.
 
-This project is a fork of [lcoutodemos/clui-cc](https://github.com/lcoutodemos/clui-cc). It keeps parts of the original Electron overlay foundation, while changing the product model from a Claude conversation shell into a queue-first terminal AI input companion.
+This project began as a fork of [lcoutodemos/clui-cc](https://github.com/lcoutodemos/clui-cc). It now presents itself as Walkinal: a queue-first terminal AI input companion built on top of that original Electron overlay foundation.
 
 Instead of acting as a chat client, Walkinal lets you stage text, files, and images in a queue, then send them into a terminal session running tools like:
 
@@ -215,7 +215,7 @@ Current high-level flow:
 
 ```text
 React renderer
-  -> preload bridge (window.clui)
+  -> preload bridge (`window.clui`, legacy API surface)
   -> Electron main process
   -> local storage + Warp/terminal bridge
   -> terminal session running Claude Code / Codex CLI

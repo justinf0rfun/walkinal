@@ -1,5 +1,7 @@
 # Slash Command Capability Matrix
 
+> 历史实验记录。该文档针对早期 `claude -p` slash command 行为探测，属于旧会话模型调研，不代表当前 Walkinal 队列发送主流程。
+
 CLI Version: 2.1.63 | Date: 2026-03-08
 Test session: 450d2d0f-4b03-4761-8ecd-8d179998127d
 

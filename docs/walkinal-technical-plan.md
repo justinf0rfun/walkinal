@@ -1,5 +1,7 @@
 # Walkinal 技术方案与任务拆分
 
+> 历史规划文档。本文包含从旧版 Clui/Claude 会话模型向 Walkinal 队列模型迁移时的分析与拆分，不再代表当前代码现状。当前实现请以 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [feature-progress.md](feature-progress.md) 为准。
+
 ## 1. 文档目标
 
 本文档基于当前仓库真实现状产出，而不是沿用 Fork 源项目的抽象设想。目标是把 [prd.md](/Users/justin/workspace/walkinal/docs/prd.md) 中的产品方向，落成一份可以直接指导迭代开发的技术方案和任务拆分。

@@ -1,4 +1,6 @@
-# CLUI Open-Source Readiness Report
+# Walkinal / CLUI Open-Source Readiness Report
+
+> 历史审计文档。该报告形成于品牌迁移前，保留了部分 `CLUI` 命名和旧安全面描述，主要用于审计背景参考，不应视为当前产品说明文档。
 
 **Date:** 2026-03-12
 **Branch:** `oss-prep`

@@ -1,5 +1,7 @@
 # Walkinal 技术方案文档
 
+> 历史产品方案文档。本文保留了早期产品方向与改造假设，其中部分技术描述已经落后于当前实现。当前产品现状请以 [README.md](../README.md)、[ARCHITECTURE.md](ARCHITECTURE.md) 和 [feature-progress.md](feature-progress.md) 为准。
+
 ## 1. 项目概述
 
 ### 1.1 基础信息
