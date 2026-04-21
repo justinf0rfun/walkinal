@@ -72,6 +72,53 @@ For any change affecting Warp sending:
 - do not assume a passing unit test proves real Warp behavior
 - call out any remaining need for manual validation
 
+## General Agent Rules
+
+These rules apply across the repository, not just on the main path.
+
+1. Never fabricate file paths, command results, test results, API names, or commit hashes.
+2. If something is unknown, read the file, run the command, or say that it has not been verified yet.
+3. Touch only what the current request requires. Do not add drive-by refactors, formatting changes, or unrelated cleanup.
+4. Every changed line should be defensible as part of the current task.
+5. If two plausible interpretations would lead to materially different implementations, stop and ask instead of silently choosing one.
+
+## Execution Discipline
+
+Before changing non-trivial code:
+
+- state the success condition clearly
+- know how the result will be verified
+- prefer the smallest change that can satisfy the request
+
+When fixing bugs:
+
+- prefer a reproducible or inspectable verification path where practical
+- prefer root-cause fixes over symptom suppression
+- if a temporary mitigation is used, say so explicitly
+
+For risky debugging on fragile integrations:
+
+- avoid stacking retries, delays, or guards without understanding the failure mode
+- if a patch is speculative, keep it isolated from the live path until verified
+
+## Failure Handling
+
+If the same fragile-path problem has already failed more than once in the current session:
+
+- stop layering more changes onto the live path
+- summarize what was learned
+- return the live path to a known-good state before proceeding
+
+## Project Learnings
+
+When the user corrects a repeated engineering mistake, add or tighten a concrete rule in this file.
+
+Rules added here should be:
+
+- specific
+- short
+- directly tied to an observed failure mode
+
 ## Change Control
 
 If the user asks for investigation, design, or planning only:
