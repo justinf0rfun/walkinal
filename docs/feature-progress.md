@@ -33,7 +33,7 @@
 - [x] Queue 上下排序
 - [ ] Queue 批量操作
 - [x] 提升应用可视高度，增大 draft / queue 区域可视空间
-- [ ] 修复多个队列项发送到 Warp 时的拼接语义，默认按段落拼接并在段落之间保留空行，而不是连成一行
+- [x] 修复多个队列项发送到 Warp 时的拼接语义，默认按段落拼接并在段落之间保留空行，而不是连成一行
 
 ## 输入体验
 
@@ -59,6 +59,23 @@
 
 - [x] README / package metadata 全量改为 Walkinal
 - [x] docs 全量对齐 Walkinal 现状
+
+## Claude 残留清理
+
+当前状态：
+
+- 当前代码中仍有部分 `Claude Code` / `clui` 时代的运行时残留
+- 这些残留主要集中在 CLI 探测、终端打开逻辑和托盘文案
+- 目前未发现类似 `Masko Code` 那种 `SessionEnd` / session lifecycle 事件监听面板实现
+
+待做：
+
+- [ ] 清理 `IPC.START` 中对 `claude -v`、`claude auth status`、`claude mcp list` 的依赖
+- [ ] 重新定义启动时返回的 static info，移除不再服务 Walkinal 主流程的 Claude 字段
+- [ ] 清理 `OPEN_IN_TERMINAL` 中 `claude` / `claude --resume` 的旧语义
+- [ ] 明确 `open in terminal` 未来应服务什么场景，避免继续绑定 Claude session 概念
+- [ ] 清理托盘 tooltip 和菜单中的 `Clui CC` / `Claude Code UI` 文案
+- [ ] 继续排查主进程和 renderer 中是否还有未识别的 Claude 运行时残留
 
 ## 下一阶段迭代
 
@@ -168,8 +185,8 @@
 
 ### P0
 
-- [ ] 提升应用可视高度，增大 draft / queue 区域可视空间
-- [ ] 修复多个队列项发送到 Warp 时的拼接语义，默认按段落拼接并在段落之间保留空行，而不是连成一行
+- [x] 提升应用可视高度，增大 draft / queue 区域可视空间
+- [x] 修复多个队列项发送到 Warp 时的拼接语义，默认按段落拼接并在段落之间保留空行，而不是连成一行
 - [ ] 当输入框第一个字符是 `/` 时，弹出快捷操作面板
 - [ ] 对齐 `Codex CLI` / `Claude Code` 的 slash-command 交互预期，支持键盘选择、补全和执行
 - [ ] 支持部分 slash 快捷操作走“不入队、不记历史、直接发送”的瞬时指令模式
