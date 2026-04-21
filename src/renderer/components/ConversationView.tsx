@@ -11,6 +11,24 @@ import type { QueueItem, SentEntry } from '../../shared/types'
 
 const DRAFT_PANEL_MAX_HEIGHT_EXPANDED = 280
 const DRAFT_PANEL_MAX_HEIGHT_COMPACT = 220
+const QUEUE_HIGHLIGHT_MS = 220
+
+function getChangedQueueItemIds(previous: QueueItem[], next: QueueItem[]): string[] {
+  const previousIndexById = new Map(previous.map((item, index) => [item.id, index]))
+  const nextIndexById = new Map(next.map((item, index) => [item.id, index]))
+
+  if (next.length < previous.length) return []
+
+  const addedIds = next
+    .filter((item) => !previousIndexById.has(item.id))
+    .map((item) => item.id)
+
+  if (addedIds.length > 0) return addedIds
+
+  return next
+    .filter((item) => previousIndexById.get(item.id) !== nextIndexById.get(item.id))
+    .map((item) => item.id)
+}
 
 // ─── Main Component ───
 
@@ -24,9 +42,12 @@ export function ConversationView() {
   const bottomRef = useRef<HTMLDivElement>(null)
   const isNearBottomRef = useRef(true)
   const prevTabIdRef = useRef(activeTabId)
+  const previousQueueItemsRef = useRef<QueueItem[]>([])
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const colors = useColors()
   const expandedUI = useThemeStore((s) => s.expandedUI)
   const [historyExpanded, setHistoryExpanded] = useState(false)
+  const [highlightedQueueItemIds, setHighlightedQueueItemIds] = useState<string[]>([])
 
   const tab = tabs.find((t) => t.id === activeTabId)
 
@@ -35,8 +56,14 @@ export function ConversationView() {
     if (activeTabId !== prevTabIdRef.current) {
       prevTabIdRef.current = activeTabId
       isNearBottomRef.current = true
+      previousQueueItemsRef.current = tab?.queueItems || []
+      setHighlightedQueueItemIds([])
+      if (highlightTimerRef.current) {
+        clearTimeout(highlightTimerRef.current)
+        highlightTimerRef.current = null
+      }
     }
-  }, [activeTabId])
+  }, [activeTabId, tab?.queueItems])
 
   // Track whether user is scrolled near the bottom
   const handleScroll = useCallback(() => {
@@ -66,6 +93,32 @@ export function ConversationView() {
       isNearBottomRef.current = true
     })
   }, [historyExpanded, sentCount])
+
+  useEffect(() => {
+    if (!tab) return
+
+    const previousQueueItems = previousQueueItemsRef.current
+    const nextQueueItems = tab.queueItems
+    previousQueueItemsRef.current = nextQueueItems
+
+    if (previousQueueItems === nextQueueItems || previousQueueItems.length === 0 && nextQueueItems.length === 0) {
+      return
+    }
+
+    const changedIds = getChangedQueueItemIds(previousQueueItems, nextQueueItems)
+    if (changedIds.length === 0) return
+
+    setHighlightedQueueItemIds(changedIds)
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current)
+    highlightTimerRef.current = setTimeout(() => {
+      setHighlightedQueueItemIds([])
+      highlightTimerRef.current = null
+    }, QUEUE_HIGHLIGHT_MS)
+  }, [tab?.queueItems, tab])
+
+  useEffect(() => () => {
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current)
+  }, [])
 
   if (!tab) return null
 
@@ -160,6 +213,7 @@ export function ConversationView() {
                     item={item}
                     index={index}
                     total={tab.queueItems.length}
+                    highlighted={highlightedQueueItemIds.includes(item.id)}
                     onEdit={() => handleEditQueueItem(item.id)}
                     onRemove={() => removeQueueItem(item.id)}
                     onMoveUp={() => moveQueueItem(item.id, 'up')}
@@ -263,6 +317,7 @@ function QueueItemCard({
   item,
   index,
   total,
+  highlighted,
   onEdit,
   onRemove,
   onMoveUp,
@@ -271,6 +326,7 @@ function QueueItemCard({
   item: QueueItem
   index: number
   total: number
+  highlighted: boolean
   onEdit: () => void
   onRemove: () => void
   onMoveUp: () => void
@@ -279,14 +335,7 @@ function QueueItemCard({
   const colors = useColors()
   const label = item.type === 'text' ? 'Text' : item.type === 'screenshot' ? 'Image' : 'File'
   const preview = item.content.length > 140 ? `${item.content.slice(0, 137)}...` : item.content
-  const [pulseMove, setPulseMove] = useState(false)
   const [previewOpen, setPreviewOpen] = useState(false)
-
-  useEffect(() => {
-    setPulseMove(true)
-    const timeout = setTimeout(() => setPulseMove(false), 220)
-    return () => clearTimeout(timeout)
-  }, [index])
 
   return (
     <>
@@ -294,8 +343,8 @@ function QueueItemCard({
         data-no-window-drag
         className="group rounded-2xl px-3 py-2"
         style={{
-          background: pulseMove ? colors.surfaceHover : colors.surfacePrimary,
-          border: `1px solid ${pulseMove ? colors.accent : colors.toolBorder}`,
+          background: highlighted ? colors.surfaceHover : colors.surfacePrimary,
+          border: `1px solid ${highlighted ? colors.accent : colors.toolBorder}`,
           userSelect: 'none',
           WebkitUserSelect: 'none',
         }}
