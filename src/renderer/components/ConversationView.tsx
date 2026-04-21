@@ -56,6 +56,7 @@ export function ConversationView() {
     if (activeTabId !== prevTabIdRef.current) {
       prevTabIdRef.current = activeTabId
       isNearBottomRef.current = true
+      setHistoryExpanded(false)
       previousQueueItemsRef.current = tab?.queueItems || []
       setHighlightedQueueItemIds([])
       if (highlightTimerRef.current) {
